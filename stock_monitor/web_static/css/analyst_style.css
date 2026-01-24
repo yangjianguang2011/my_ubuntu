@@ -1,0 +1,153 @@
+/* 分析师数据展示样式 */
+
+.analyst-data-container {
+    background-color: white;
+    padding: 20px;
+    border-radius: 8px;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+    min-height: 400px;
+    height: auto;
+    overflow-x: auto; /* 允许水平滚动以适应表格 */
+}
+
+/* Tabulator表格容器样式 */
+.recently-updated-stocks-table {
+    height: 600px; /* 确保表格有足够的高度 */
+    margin-top: 20px;
+}
+
+/* 为分析师摘要部分添加样式 */
+.analyst-summary {
+    background-color: #e8f4f8;
+    padding: 15px;
+    border-radius: 5px;
+    margin-bottom: 20px;
+    border-left: 4px solid #3498db;
+}
+
+.analyst-summary h3 {
+    margin-top: 0;
+    color: #2980b9;
+    font-size: 1.2em;
+}
+
+.analyst-summary p {
+    margin: 5px 0;
+    color: #555;
+}
+
+.analyst-controls {
+    display: flex;
+    gap: 15px;
+    /*align-items: center;*/
+    align-items: flex-start;
+    flex-wrap: wrap;
+    margin-bottom: 20px;
+    padding: 15px;
+    background-color: #f8f9fa;
+    border-radius: 5px;
+}
+
+.analyst-controls select, .analyst-controls button {
+    padding: 8px 12px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    font-size: 14px;
+    min-width: 150px;
+}
+
+/* 分析师数据表格样式 */
+.analyst-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 15px;
+    font-size: 14px;
+    background-color: white;
+}
+
+.analyst-table th, .analyst-table td {
+    border: 1px solid #ddd;
+    padding: 8px;
+    text-align: left;
+}
+
+.analyst-table th {
+    background-color: #f2f2f2;
+    font-weight: bold;
+}
+
+.analyst-table tr:nth-child(even) {
+    background-color: #f9f9f9;
+}
+
+.analyst-table tr:hover {
+    background-color: #f5f5f5;
+}
+
+/* 分析师数据统计样式 */
+.analyst-summary {
+    background-color: #e8f4f8;
+    padding: 15px;
+    border-radius: 5px;
+    margin-bottom: 20px;
+}
+
+.analyst-summary h3 {
+    margin-top: 0;
+    color: #2980b9;
+}
+
+/* 分析师数据导航链接样式 */
+.platform-links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-bottom: 20px;
+}
+
+.platform-link {
+    background-color: #e6f7ff;
+    color: #1890ff;
+    text-decoration: none;
+    padding: 6px 12px;
+    border-radius: 6px;
+    font-size: 14px;
+    font-weight: 500;
+    white-space: nowrap;
+    transition: background-color 0.2s;
+}
+
+.platform-link:hover {
+    background-color: #bae7ff;
+}
+
+/* 股票链接样式 */
+.stock-link {
+    color: #1976d2;
+    text-decoration: none;
+}
+
+.stock-link:hover {
+    text-decoration: underline;
+}
+
+/* 数据源链接样式 */
+.data-source-link {
+    text-align: center;
+    margin-bottom: 20px;
+}
+
+.data-source-link a {
+    color: #1976d2;
+    text-decoration: none;
+    font-size: 16px;
+    font-weight: bold;
+}
+
+/* 无数据提示样式 */
+.no-data {
+    text-align: center;
+    padding: 20px;
+    color: #666;
+    font-style: italic;
+}

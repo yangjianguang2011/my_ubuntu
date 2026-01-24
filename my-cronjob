@@ -1,0 +1,19 @@
+# Example of job definition:
+# .---------------- minute (0 - 59)
+# |  .------------- hour (0 - 23)
+# |  |  .---------- day of month (1 - 31)
+# |  |  |  .------- month (1 - 12) OR jan,feb,mar,apr ...
+# |  |  |  |  .---- day of week (0 - 6) (Sunday=0 or 7) OR sun,mon,tue,wed,thu,fri,sat
+# |  |  |  |  |
+# *  *  *  *  * user-name command to be executed
+# IPTV 定时下载任务，每天更新一次
+0 1 * * * root /usr/bin/python3 /root/iptv/download_m3u.py >> /var/log/cron.log 2>&1
+
+#New 任务每小时执行一次
+0 */1 * * * root /usr/bin/python3 /root/news/crawl_save_news.py >> /var/log/cron.log 2>&1
+
+#News 任务每小时执行一次，将
+0 */1 * * * root /usr/bin/chown -R 1000:1001 /data/news/
+
+
+

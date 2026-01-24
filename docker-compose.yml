@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  my_ubuntu:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: my_ubuntu
+    ports:
+      - "4400:80"    # Nginx web服务端口
+      - "4401:5001"  # 股票监控应用端口(如果stock_monitor应用需要)
+      - "4422:4422"    # SSH remote access port (映射到主机的4402端口)
+    volumes:
+      - /vol1/1000/docker/my-ubuntu/run:/data  # 数据卷挂载
+      - /vol1/1009/paddle_mount:/paddle  # 数据卷挂载
+    restart: always
+    privileged: true  # 由于容器内需要运行cron等系统服务，可能需要特权模式
