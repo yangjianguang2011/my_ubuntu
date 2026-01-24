@@ -1,5 +1,5 @@
 ﻿Category	Channels	Playlist
-iptv	10	http://www.jgyang.cn:4600/tvbox/iptv.m3u
+iptv	10	http://www.yourdomain.cn:4600/tvbox/iptv.m3u
 ipv4  10  https://live.zbds.top/tv/iptv4.m3u
 ftindy 10 https://raw.githubusercontent.com/Ftindy/IPTV-URL/main/IPV6.m3u
 #########

@@ -20,7 +20,7 @@ def get_global_config():
     default_analyst_log_file = '/data/stock_monitor/analyst_data/log.txt'
     default_database_dir = '/data/stock_monitor/database'
 
-    default_message_server = 'https://message.jgyang.cn:5555'
+    default_message_server = 'https://message.yourdomain.cn:5555'
     default_message_username = 'root'
     default_message_token = '12123121'
     default_message_channel = 'wechat'
