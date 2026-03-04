@@ -3,17 +3,16 @@
 提供了Redis、SQLite和混合缓存三种方案
 """
 
-import logging
 import os
 import json
-import pickle
 from datetime import datetime, timedelta
 from logger_config import logger,gconfig
 
 STOCK_CACHE_DURATOIN_SECONDS = gconfig.get('stock_cache_timeout', 3*60)
 INDUSTRY_CACHE_DURATION_SECONDS = gconfig.get('industry_cache_timeout', 24*60*60)
 ANALYST_CACHE_DURATION_SECONDS = gconfig.get('analyst_cache_timeout', 24*60*60)
-INDEX_CACHE_DURATION_SECONDS = gconfig.get('index_cache_timeout', 24*60*60)
+INDEX_CACHE_DURATION_SECONDS = gconfig.get('index_cache_timeout', 1*24*60*60)
+FUND_CACHE_DURATION_SECONDS = gconfig.get('fund_cache_timeout', 1*24*60*60)  # 新增基金缓存时长配置
 
 class LongTermStorage:
     """
@@ -213,112 +212,6 @@ class LongTermStorage:
             logger.error(f"清理过期长期存储数据时出错: {e}")
             return 0
 
-class RedisCache:
-    """
-    Redis缓存实现
-    适合高性能、高并发场景
-    """
-    def __init__(self):
-        try:
-            import redis
-            # 从环境变量获取Redis配置
-            redis_host = os.getenv('REDIS_HOST', 'localhost')
-            redis_port = int(os.getenv('REDIS_PORT', 6379))
-            redis_db = int(os.getenv('REDIS_DB', 0))
-            redis_password = os.getenv('REDIS_PASSWORD', None)
-            
-            self.redis_client = redis.Redis(
-                host=redis_host,
-                port=redis_port,
-                db=redis_db,
-                password=redis_password,
-                decode_responses=False # 保持二进制模式以支持pickle
-            )
-            # 测试连接
-            self.redis_client.ping()
-            logger.info("成功连接到Redis服务器")
-        except ImportError:
-            logger.error("Redis库未安装，请运行: pip install redis")
-            self.redis_client = None
-        except Exception as e:
-            logger.error(f"连接Redis失败: {e}")
-            self.redis_client = None
-
-    def get_cached_data(self, cache_key, cache_type='stock', cache_duration=None):
-        """从Redis获取缓存数据"""
-        if not self.redis_client:
-            return None
-            
-        if cache_type == 'stock':
-            duration = cache_duration if cache_duration is not None else STOCK_CACHE_DURATOIN_SECONDS
-        else:
-            duration = cache_duration if cache_duration is not None else INDUSTRY_CACHE_DURATION_SECONDS
-
-        try:
-            cached_data = self.redis_client.get(cache_key)
-            if cached_data:
-                cached_item = pickle.loads(cached_data)
-                cache_time = cached_item['time']
-                data = cached_item['data']
-                
-                if datetime.now() - cache_time < timedelta(seconds=duration):
-                    logger.info(f"从Redis缓存获取数据: {cache_key}")
-                    return data
-                else:
-                    # 缓存过期，删除它
-                    self.redis_client.delete(cache_key)
-                    logger.info(f"Redis缓存已过期，删除: {cache_key}")
-        except Exception as e:
-            logger.error(f"从Redis获取缓存数据时出错: {e}")
-        
-        return None
-
-    def set_cache_data(self, cache_key, data, cache_type='stock', cache_duration=None):
-        """设置Redis缓存数据"""
-        if not self.redis_client:
-            return
-            
-        if cache_type == 'stock':
-            duration = cache_duration if cache_duration is not None else STOCK_CACHE_DURATOIN_SECONDS
-        else:
-            duration = cache_duration if cache_duration is not None else INDUSTRY_CACHE_DURATION_SECONDS
-
-        try:
-            cache_item = {
-                'time': datetime.now(),
-                'data': data
-            }
-            serialized_data = pickle.dumps(cache_item)
-            self.redis_client.setex(cache_key, duration, serialized_data)
-            logger.info(f"数据已缓存到Redis: {cache_key}")
-        except Exception as e:
-            logger.error(f"设置Redis缓存数据时出错: {e}")
-
-    def get_industry_cached_data(self, cache_key, cache_duration=None):
-        """从Redis获取行业数据缓存"""
-        return self.get_cached_data(cache_key, 'industry', cache_duration)
-
-    def set_industry_cache_data(self, cache_key, data, cache_duration=None):
-        """设置Redis行业数据缓存"""
-        self.set_cache_data(cache_key, data, 'industry', cache_duration)
-
-    def get_analyst_cached_data(self, cache_key, cache_duration=None):
-        """从Redis获取分析师数据缓存"""
-        return self.get_cached_data(cache_key, 'analyst', cache_duration)
-
-    def set_analyst_cache_data(self, cache_key, data, cache_duration=None):
-        """设置Redis分析师数据缓存"""
-        self.set_cache_data(cache_key, data, 'analyst', cache_duration)
-
-    def get_index_cached_data(self, cache_key, cache_duration=None):
-        """从Redis获取指数数据缓存"""
-        return self.get_cached_data(cache_key, 'index', cache_duration)
-
-    def set_index_cache_data(self, cache_key, data, cache_duration=None):
-        """设置Redis指数数据缓存"""
-        self.set_cache_data(cache_key, data, 'index', cache_duration)
-
-
 class SQLiteCache:
     """
     SQLite缓存实现
@@ -380,11 +273,22 @@ class SQLiteCache:
                         cache_duration INTEGER NOT NULL
                     )
                 ''')
-                
+
+                # 创建基金数据缓存表
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS fund_cache (
+                        cache_key TEXT PRIMARY KEY,
+                        data TEXT NOT NULL,
+                        cache_time TIMESTAMP NOT NULL,
+                        cache_duration INTEGER NOT NULL
+                    )
+                ''')
+
                 # 为缓存时间创建索引以提高查询性能
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_stock_cache_time ON stock_cache(cache_time)')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_industry_cache_time ON industry_cache(cache_time)')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_index_cache_time ON index_cache(cache_time)')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_fund_cache_time ON fund_cache(cache_time)')
                 
                 conn.commit()
                 logger.info("SQLite缓存数据库初始化完成")
@@ -410,11 +314,18 @@ class SQLiteCache:
 
                 # 清理过期的行业缓存
                 cursor.execute('''
-                    DELETE FROM industry_cache 
+                    DELETE FROM industry_cache
                     WHERE datetime(cache_time, '+' || cache_duration || ' seconds') < ?
                 ''', (current_time,))
                 logger.info(f"清理了 {cursor.rowcount} 条行业过期缓存数据")
-                
+
+                # 清理过期的基金缓存
+                cursor.execute('''
+                    DELETE FROM fund_cache
+                    WHERE datetime(cache_time, '+' || cache_duration || ' seconds') < ?
+                ''', (current_time,))
+                logger.info(f"清理了 {cursor.rowcount} 条基金过期缓存数据")
+
                 deleted_count = cursor.rowcount
                 if deleted_count > 0:
                     logger.info(f"清理了 {deleted_count} 条过期缓存数据")
@@ -441,6 +352,8 @@ class SQLiteCache:
                     table_name = 'analyst_cache'
                 elif cache_type == 'index':
                     table_name = 'index_cache'
+                elif cache_type == 'fund':
+                    table_name = 'fund_cache'
                 else:  # 默认
                     logger.error(f"未知缓存类型 {cache_type}，使用默认表 stock_cache")
                     table_name = 'stock_cache'
@@ -481,10 +394,12 @@ class SQLiteCache:
                 duration = cache_duration if cache_duration is not None else STOCK_CACHE_DURATOIN_SECONDS
             elif cache_type == 'industry':
                 duration = cache_duration if cache_duration is not None else INDUSTRY_CACHE_DURATION_SECONDS
-            elif cache_type == 'analyst': 
+            elif cache_type == 'analyst':
                 duration = cache_duration if cache_duration is not None else ANALYST_CACHE_DURATION_SECONDS
             elif cache_type == "index":
                 duration = cache_duration if cache_duration is not None else INDEX_CACHE_DURATION_SECONDS
+            elif cache_type == "fund":
+                duration = cache_duration if cache_duration is not None else FUND_CACHE_DURATION_SECONDS
             else:  # 默认
                 logger.warning(f"set_cache_data: unknow cache_type {cache_type} , use defalut industry cache duration...")
                 duration = cache_duration if cache_duration is not None else INDUSTRY_CACHE_DURATION_SECONDS
@@ -501,6 +416,8 @@ class SQLiteCache:
                     table_name = 'analyst_cache'
                 elif cache_type == 'index':
                     table_name = 'index_cache'
+                elif cache_type == 'fund':
+                    table_name = 'fund_cache'
                 else:  # analyst 或其他类型
                     logger.warning(f"未知缓存类型 {cache_type}，使用默认表 industry_cache")
                     table_name = 'analyst_cache'
@@ -534,14 +451,9 @@ class HybridCache:
         self.memory_cache = {}  # 一级缓存：内存
         self.memory_cache_lock = threading.Lock()
         
-        # 二级缓存：根据配置选择
-        cache_type = os.getenv('CACHE_TYPE', 'sqlite').lower()
-        
-        if cache_type == 'redis':
-            self.secondary_cache = RedisCache()
-        else: # 默认使用SQLite
-            self.secondary_cache = SQLiteCache()
-        logger.info(f"使用混合缓存策略，二级缓存类型: {cache_type}")
+        # 二级缓存：默认使用SQLite
+        self.secondary_cache = SQLiteCache()
+        logger.info("使用混合缓存策略，二级缓存类型: sqlite")
     
     def get_cached_data(self, cache_key, cache_type='stock', cache_duration=None):
         """多级缓存获取数据"""
@@ -560,6 +472,8 @@ class HybridCache:
                     duration = cache_duration if cache_duration is not None else ANALYST_CACHE_DURATION_SECONDS
                 elif cache_type == 'index':
                     duration = cache_duration if cache_duration is not None else INDUSTRY_CACHE_DURATION_SECONDS  # 指数数据使用与行业数据相同的缓存时长
+                elif cache_type == 'fund':
+                    duration = cache_duration if cache_duration is not None else FUND_CACHE_DURATION_SECONDS
                 else:
                     duration = cache_duration if cache_duration is not None else STOCK_CACHE_DURATOIN_SECONDS
                     logger.warning(f"未知缓存类型 {cache_type}，使用默认时长")
@@ -576,9 +490,11 @@ class HybridCache:
             data = self.secondary_cache.get_cached_data(cache_key, cache_type, cache_duration)
         elif cache_type == 'industry':
             data = self.secondary_cache.get_cached_data(cache_key, cache_type, cache_duration)
-        elif cache_type == 'analyst': 
+        elif cache_type == 'analyst':
             data = self.secondary_cache.get_cached_data(cache_key, cache_type, cache_duration)
         elif cache_type == 'index':
+            data = self.secondary_cache.get_cached_data(cache_key, cache_type, cache_duration)
+        elif cache_type == 'fund':
             data = self.secondary_cache.get_cached_data(cache_key, cache_type, cache_duration)
         else:
             logger.warning(f"未知缓存类型 {cache_type}，从stock缓存获取数据")
@@ -616,15 +532,20 @@ class HybridCache:
         """设置多级指数数据缓存"""
         self.set_cache_data(cache_key, data, 'index', cache_duration)
 
+    def get_fund_cached_data(self, cache_key, cache_duration=None):
+        """从多级缓存获取基金数据"""
+        return self.get_cached_data(cache_key, 'fund', cache_duration)
+
+    def set_fund_cache_data(self, cache_key, data, cache_duration=None):
+        """设置多级基金数据缓存"""
+        self.set_cache_data(cache_key, data, 'fund', cache_duration)
+
 
 # 全局缓存实例
 def initialize_cache():
     """初始化缓存系统"""
     cache_type = os.getenv('CACHE_TYPE', 'hybrid').lower()
-    if cache_type == 'redis':
-        logger.info("使用Redis作为缓存系统")
-        return RedisCache()
-    elif cache_type == 'sqlite':
+    if cache_type == 'sqlite':
         logger.info("使用SQLite作为缓存系统")
         return SQLiteCache()
     elif cache_type == 'hybrid':
@@ -674,6 +595,14 @@ def get_index_cached_data(cache_key, cache_duration=None):
 def set_index_cache_data(cache_key, data, cache_duration=None):
     """设置指数数据缓存"""
     cache_system.set_cache_data(cache_key, data, 'index', cache_duration)
+
+def get_fund_cached_data(cache_key, cache_duration=None):
+    """从基金数据缓存获取数据"""
+    return cache_system.get_cached_data(cache_key, 'fund', cache_duration)
+
+def set_fund_cache_data(cache_key, data, cache_duration=None):
+    """设置基金数据缓存"""
+    cache_system.set_cache_data(cache_key, data, 'fund', cache_duration)
 
 # 全局长期存储实例
 long_term_storage = LongTermStorage()

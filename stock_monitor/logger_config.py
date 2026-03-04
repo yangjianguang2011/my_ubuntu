@@ -10,17 +10,20 @@ def get_global_config():
     Linux系统：使用/data/stock_monitor/settings.json
     """
     cdir = os.path.dirname(os.path.abspath(__file__))
+    rdir = os.path.dirname('/data/stock_monitor/')
+    wrdir = os.path.join(cdir, '..', 'run', 'stock_monitor')
     default_template_dir = os.path.join(cdir, "web_templates")
     default_static_dir = os.path.join(cdir, "web_static")
     default_setting_file = os.path.join(cdir, 'settings.json')
-    default_stocks_file = '/data/stock_monitor/stocks.json'
-    default_analyst_dir = '/data/stock_monitor/analyst_data'
-    default_xueqiu_dir = '/data/stock_monitor/xueqiu_data'
-    default_log_file = '/data/stock_monitor/log.txt'
-    default_analyst_log_file = '/data/stock_monitor/analyst_data/log.txt'
-    default_database_dir = '/data/stock_monitor/database'
+    default_stocks_file = os.path.join(rdir, 'stocks.json')
+    default_analyst_dir = os.path.join(rdir, 'analyst_data')
+    default_xueqiu_dir = os.path.join(rdir, 'xueqiu_data')
+    default_log_file = os.path.join(rdir, 'log.txt')
+    default_analyst_log_file = os.path.join(default_analyst_dir, 'log.txt')
+    default_xueqiu_log_file = os.path.join(default_xueqiu_dir, 'log.txt')
+    default_database_dir = os.path.join(rdir, 'database')
 
-    default_message_server = 'https://message.yourdomain.cn:5555'
+    default_message_server = 'https://message.jgyang.cn:5555'
     default_message_username = 'root'
     default_message_token = '12123121'
     default_message_channel = 'wechat'
@@ -39,6 +42,7 @@ def get_global_config():
                     "stocks_file": default_stocks_file,
                     "log_file": default_log_file,
                     "analyst_log_file": default_analyst_log_file,
+                    "xueqiu_log_file": default_xueqiu_log_file,
                     "database_dir": default_database_dir,
                     "message_server": default_message_server,
                     "message_username": default_message_username,
@@ -51,20 +55,19 @@ def get_global_config():
                     }
     
     if sys.platform.startswith('win'):
-        config['stocks_file'] = os.path.join(cdir, '..', 'run', 'stock_monitor', 'stocks.json')
-        config['log_file'] = os.path.join(cdir, '..', 'run', 'stock_monitor', 'log.txt')
-        config['analyst_data_dir'] = os.path.join(cdir, '..', 'run', 'stock_monitor', 'analyst_data')
-        config['xueqiu_data_dir'] = os.path.join(cdir,'..', 'run', 'stock_monitor', 'xueqiu_data')
-        config['analyst_log_file'] = os.path.join(cdir, '..', 'run', 'stock_monitor','analyst_data','log.txt')
-        config['database_dir'] =  os.path.join(cdir, '..', 'run', 'stock_monitor', 'database')
+        config['stocks_file'] = os.path.join(wrdir, 'stocks.json')
+        config['log_file'] = os.path.join(wrdir, 'log.txt')
+        config['analyst_data_dir'] = os.path.join(wrdir, 'analyst_data')
+        config['xueqiu_data_dir'] = os.path.join(wrdir, 'xueqiu_data')
+        config['database_dir'] =  os.path.join(wrdir, 'database')
+        config['analyst_log_file'] = os.path.join(wrdir, 'analyst_data', 'log.txt')
+        config['xueqiu_log_file'] = os.path.join(wrdir, 'xueqiu_data', 'log.txt')
         config['platform'] = 'windows'
 
     #make sure dir exists
     os.makedirs(config['analyst_data_dir'], exist_ok=True)
     os.makedirs(config['database_dir'], exist_ok=True)
     os.makedirs(config['xueqiu_data_dir'], exist_ok=True)
-
-    # print(f"配置文件路径: {config}")  # 注释掉函数内的打印，避免重复输出
 
     return config
 
@@ -74,6 +77,8 @@ def get_log_file_path(name='stock_monitor'):
 
     if name == 'eastmoney_analyst':
         log_file_path = gconfig['analyst_log_file']
+    elif name == 'xueqiu_scraper':
+        log_file_path = gconfig['xueqiu_log_file']
     else:
         log_file_path = gconfig['log_file']
 
@@ -98,7 +103,11 @@ def setup_logger(name=__name__):
         )
         
         # 创建文件处理器
-        file_handler = logging.FileHandler(log_file_path, encoding='utf-8')
+        # 在Windows系统上使用utf-8-sig编码以避免乱码问题
+        if sys.platform.startswith('win'):
+            file_handler = logging.FileHandler(log_file_path, encoding='utf-8-sig')
+        else:
+            file_handler = logging.FileHandler(log_file_path, encoding='utf-8')
         file_handler.setLevel(logging.INFO)
         file_handler.setFormatter(formatter)
         

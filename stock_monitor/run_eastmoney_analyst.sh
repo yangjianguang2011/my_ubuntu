@@ -66,12 +66,6 @@ run_python_crawler() {
         error "Python generate_html_reports execution failed"
     fi
 
-    if python3 xueqiu_scraper.py --update-today 2>&1 | tee -a "$LOG_FILE"; then
-        log "Python xueqiu scraper executed successfully"
-    else
-        error "python xueqiu_scraper execution failed"
-    fi
-
     if python3 "$PYTHON_SCRIPT" 0 0 2>&1 | tee -a "$LOG_FILE"; then
         log "Python crawler executed successfully"
     else
@@ -111,9 +105,6 @@ set_file_permissions() {
         return 1
     fi
     
-    chown -R 1000:1001 "$XUEQIU_DATA_DIR"
-    chmod -R 777 "$XUEQIU_DATA_DIR"
-
 }
 
 cleanup() {

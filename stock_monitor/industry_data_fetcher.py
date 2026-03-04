@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
 import akshare as ak
 import pandas as pd
+import time
 from logger_config import logger
 
 
@@ -97,11 +98,55 @@ def get_industry_names():
         # 使用akshare获取行业名称
         df = ak.stock_board_industry_name_em()
         industry_list = df.to_dict('records')
-        set_industry_cache_data(cache_key, industry_list, cache_duration=1*24*3600) 
+        set_industry_cache_data(cache_key, industry_list, cache_duration=7*24*3600)
         logger.info(f"获取到 {len(industry_list)} 个行业名称")
         return industry_list
     except Exception as e:
         logger.error(f"获取行业名称列表时出错: {str(e)}")
+        # 如果东方财富接口失败，尝试使用新浪数据
+        return get_sina_industry_names()
+
+
+def get_sina_industry_names():
+    """
+    获取新浪行业名称列表（备选方案）
+    """
+    cache_key = "sina_industry_names"
+    cached_data = get_industry_cached_data(cache_key)
+    if cached_data is not None:
+        logger.info("从缓存返回新浪行业名称列表")
+        return cached_data
+
+    try:
+        logger.info("开始获取新浪行业名称列表")
+        # 获取所有指数信息
+        spot_data = ak.stock_zh_index_spot_em()
+
+        # 筛选行业相关的指数
+        industry_keywords = ['行业', '银行', '保险', '券商', '地产', '医药', '消费', '科技', '制造',
+                           '材料', '工业', '能源', '公用', '环保', '农林', '建筑', '交运', '钢铁',
+                           '有色', '化工', '纺织', '造纸', '家电', '食品', '饮料', '汽车', '机械',
+                           '电子', '通信', '计算机', '传媒', '商贸', '旅游', '医疗', '生物', '制药',
+                           '电力', '燃气', '港口', '机场', '高速', '物流']
+
+        industry_mask = spot_data['名称'].apply(lambda x: any(keyword in str(x) for keyword in industry_keywords))
+        industry_indices = spot_data[industry_mask]
+
+        # 转换为字典格式，与原接口兼容
+        industry_list = []
+        for _, row in industry_indices.iterrows():
+            industry_list.append({
+                '板块名称': row['名称'],
+                '代码': row['代码'],
+                '最新价': row['最新价'],
+                '涨跌幅': row['涨跌幅']
+            })
+
+        set_industry_cache_data(cache_key, industry_list, cache_duration=7*24*3600)
+        logger.info(f"获取到 {len(industry_list)} 个新浪行业名称")
+        return industry_list
+    except Exception as e:
+        logger.error(f"获取新浪行业名称列表时出错: {str(e)}")
         return []
 
 
@@ -111,9 +156,9 @@ def get_industry_constituents(industry_name):
     :param industry_name: 行业名称
     :return: 行业成份股列表
     """
-   
+
     cache_key = f"industry_constituents_{industry_name}"
-    cached_data = get_industry_cached_data(cache_key) 
+    cached_data = get_industry_cached_data(cache_key)
     if cached_data is not None:
         #logger.info(f"从缓存返回行业 {industry_name} 的成份股列表")
         return cached_data
@@ -125,23 +170,23 @@ def get_industry_constituents(industry_name):
         # 处理NaN值，将其转换为None
         df = df.where(pd.notna(df), None)
         constituents = df.to_dict('records')
-        set_industry_cache_data(cache_key, constituents, cache_duration=6*24*60*60)
+        set_industry_cache_data(cache_key, constituents, cache_duration=7*24*60*60)
         logger.info(f"获取到行业 {industry_name} {len(constituents)} 个成份股")
         return constituents
     except Exception as e:
         logger.error(f"获取行业 {industry_name} 成份股列表时出错: {str(e)}")
         return []
 
+
 ###所有行业的指定天数内的涨幅排行榜
 #1.获得所有行业的名称列表
 #2.获得行业的历史数据并按涨幅排列
-def get_industry_ranking(period="30"):
+def get_industry_ranking_original(period="30"):
     """
-    获取行业涨跌幅排行
+    原始的获取行业涨跌幅排行函数（使用东方财富数据）
     :param period: 时间周期（天数），如1, 30, 60, 120, 365
     :return: 行业涨跌幅排行列表
     """
-    
     cache_key = f"industry_ranking_{period}"
     cached_data = get_industry_cached_data(cache_key)
     if cached_data is not None:
@@ -154,23 +199,26 @@ def get_industry_ranking(period="30"):
         # 使用akshare获取行业板块信息
         ranking_data = []
         industry_list = get_industry_names()
-        
+
         # 获取当前日期
-        from datetime import datetime, timedelta
-        current_date = datetime.now()
+        current_date = datetime.now() - timedelta(days=1)  # 使用前一天的数据，避免当天数据不完整
         end_date = current_date.strftime('%Y%m%d')
         start_date = (current_date - timedelta(days=int(period))).strftime('%Y%m%d')
-        
+
         # 对于最近1天，我们使用前一天作为开始日期，今天作为结束日期
         if period == "1":
             start_date = (current_date - timedelta(days=1)).strftime('%Y%m%d')
             end_date = current_date.strftime('%Y%m%d')
-        
+
+        # 记录处理进度
+        total_industries = len(industry_list)
+        processed_count = 0
+
         for industry in industry_list:
             industry_name = industry.get('板块名称', '')
             if not industry_name:
                 continue
-                
+
             try:
                 # 获取该行业的历史数据，指定开始和结束日期
                 if period == "1":
@@ -180,16 +228,16 @@ def get_industry_ranking(period="30"):
                     df = get_single_industry_history(industry_name, recent_start_date, end_date)
                 else:
                     df = get_single_industry_history(industry_name, start_date, end_date)
-                
+
                 if df.empty:
                     continue
-                    
+
                 # 按日期排序
                 df = df.sort_values(by='日期').reset_index(drop=True)
-                
+
                 # 处理NaN值，将其转换为None
                 df = df.where(pd.notna(df), None)
-                
+
                 # 对于最近1天的特殊处理
                 if period == "1":
                     # 选择最近的两个日期数据进行比较
@@ -200,7 +248,7 @@ def get_industry_ranking(period="30"):
                         period_data = df[
                             df['日期'].isin(last_two_dates)
                         ].copy()
-                        
+
                         if len(period_data) >= 2:
                             first_record = period_data.iloc[0]  # 前一天的数据
                             last_record = period_data.iloc[-1]  # 最新一天的数据
@@ -215,29 +263,29 @@ def get_industry_ranking(period="30"):
                     # 对于其他周期，选择周期内的数据
                     if len(df) < 2:
                         continue
-                        
+
                     # 获取周期内的第一条和最后一条数据
                     start_idx = max(0, len(df) - int(period))
                     period_data = df.iloc[start_idx:]
-                    
+
                     if len(period_data) < 2:
                         continue
-                        
+
                     first_record = period_data.iloc[0]  # 周期内较早的数据
                     last_record = period_data.iloc[-1]  # 周期内最新的数据
-                
+
                 # 检查收盘价是否为None
                 if first_record['收盘'] is None or last_record['收盘'] is None:
                     continue
-                    
+
                 start_price = float(first_record['收盘'])
                 end_price = float(last_record['收盘'])
-                
+
                 if start_price == 0:
                     continue
-                    
+
                 change_pct = round(((end_price - start_price) / start_price) * 100, 2)
-                
+
                 ranking_data.append({
                     'industry_name': industry_name,
                     'start_price': start_price,
@@ -247,14 +295,268 @@ def get_industry_ranking(period="30"):
                     'end_date': str(last_record['日期']),
                     'volume': float(last_record['成交量']) if last_record['成交量'] and last_record['成交量'] != '-' else 0
                 })
+                time.sleep(1)  # 每次请求后暂停1秒
             except Exception as e:
                 logger.warning(f"获取行业 {industry_name} 的历史数据时出错: {str(e)}")
                 continue
-        
-        # 按涨跌幅排序，处理None值
-        ranking_data.sort(key=lambda x: (x['change_pct'] is None, x['change_pct']), reverse=True)
-        set_industry_cache_data(cache_key, ranking_data) 
-        logger.info(f"获取到 {len(ranking_data)} 个行业的 {period}天 涨跌幅排行数据")
+            finally:
+                # 更新处理计数
+                processed_count += 1
+
+                # 每处理一定数量的行业后输出进度
+                if processed_count % 10 == 0:
+                    logger.info(f"已处理 {processed_count}/{total_industries} 个行业")
+
+        # 添加延迟以避免过于频繁的API调用
+        time.sleep(1)  #
+
+        if ranking_data:
+            ranking_data.sort(key=lambda x: (x['change_pct'] is None, x['change_pct']), reverse=True)
+            set_industry_cache_data(cache_key, ranking_data)
+            logger.info(f"获取到 {len(ranking_data)} 个行业的 {period}天 涨跌幅排行数据")
+        return ranking_data
+    except Exception as e:
+        logger.error(f"获取行业 {period}天 涨跌幅排行时出错: {str(e)}")
+        return []
+
+
+def get_sina_single_industry_history(industry_code, start_date, end_date):
+    """
+    获取单个行业的历史数据（使用新浪数据）
+    """
+    cache_key = f"sina_industry_full_history_{industry_code}"
+
+    # 首先尝试从缓存获取完整历史数据
+    cached_data = get_industry_cached_data(cache_key)
+    if cached_data is not None:
+        logger.debug(f"从缓存返回行业 {industry_code} 的完整历史数据")
+        if cached_data:
+            df = pd.DataFrame(cached_data)
+            if not df.empty and 'date' in df.columns:
+                df['date'] = pd.to_datetime(df['date'])
+                mask = (df['date'] >= pd.to_datetime(start_date)) & (df['date'] <= pd.to_datetime(end_date))
+                filtered_df = df.loc[mask].copy()
+                filtered_df.reset_index(drop=True, inplace=True)
+                return filtered_df
+            return df
+        else:
+            return pd.DataFrame()
+
+    try:
+        # 获取该行业的历史数据
+        df = ak.stock_zh_index_daily(symbol=f"sh{industry_code}")
+
+        # 检查返回的数据是否有效
+        if df is None:
+            logger.warning(f"行业 {industry_code} 返回了None数据")
+            return pd.DataFrame()
+
+        if df.empty:
+            logger.warning(f"行业 {industry_code} 返回了空的DataFrame")
+            return pd.DataFrame()
+
+        # 检查是否包含必要的列
+        required_columns = ['open', 'high', 'low', 'close']
+        if not all(col in df.columns for col in required_columns):
+            logger.warning(f"行业 {industry_code} 返回的数据缺少必要列: {list(df.columns)}")
+            return pd.DataFrame()
+
+        # 缓存原始数据
+        set_industry_cache_data(cache_key, df.to_dict('records'))
+
+        # 筛选指定日期范围的数据
+        df['date'] = pd.to_datetime(df.index)
+        mask = (df['date'] >= pd.to_datetime(start_date)) & (df['date'] <= pd.to_datetime(end_date))
+        filtered_df = df.loc[mask].copy()
+        filtered_df.reset_index(drop=True, inplace=True)
+
+        return filtered_df
+    except Exception as e:
+        logger.error(f"获取行业 {industry_code} 的历史数据时出错: {str(e)}")
+        return pd.DataFrame()
+
+
+def get_sina_industry_ranking(period="30"):
+    """
+    获取新浪行业涨跌幅排行（备选方案）
+    """
+    cache_key = f"sina_industry_ranking_{period}"
+    cached_data = get_industry_cached_data(cache_key)
+    if cached_data is not None:
+        logger.info(f"从缓存返回新浪行业 {period}天 涨跌幅排行")
+        return cached_data
+
+    try:
+        logger.info(f"开始获取新浪行业 {period}天 涨跌幅排行")
+
+        # 获取行业列表
+        industry_list = get_sina_industry_names()
+
+        # 获取当前日期
+        current_date = datetime.now() - timedelta(days=1)  # 使用前一天的数据，避免当天数据不完整
+        end_date = current_date.strftime('%Y%m%d')
+        start_date = (current_date - timedelta(days=int(period))).strftime('%Y%m%d')
+
+        # 对于最近1天，我们使用前一天作为开始日期，今天作为结束日期
+        if period == "1":
+            start_date = (current_date - timedelta(days=1)).strftime('%Y%m%d')
+            end_date = current_date.strftime('%Y%m%d')
+
+        # 记录处理进度
+        total_industries = len(industry_list)
+        processed_count = 0
+
+        ranking_data = []
+        for industry in industry_list:
+            industry_name = industry.get('板块名称', '')
+            industry_code = industry.get('代码', '')
+
+            if not industry_name or not industry_code:
+                continue
+
+            try:
+                # 获取该行业的历史数据
+                df = get_sina_single_industry_history(industry_code, start_date, end_date)
+
+                if df.empty:
+                    continue
+
+                # 按日期排序
+                df = df.sort_values(by='date').reset_index(drop=True)
+
+                # 处理NaN值，将其转换为None
+                df = df.where(pd.notna(df), None)
+
+                # 对于最近1天的特殊处理
+                if period == "1":
+                    # 选择最近的两个日期数据进行比较
+                    unique_dates = df['date'].unique()
+                    if len(unique_dates) >= 2:
+                        # 获取最近两天的数据
+                        last_two_dates = unique_dates[-2:] # 最近的两个日期
+                        period_data = df[
+                            df['date'].isin(last_two_dates)
+                        ].copy()
+
+                        if len(period_data) >= 2:
+                            first_record = period_data.iloc[0]  # 前一天的数据
+                            last_record = period_data.iloc[-1]  # 最新一天的数据
+                        else:
+                            continue  # 数据不足，跳过
+                    elif len(unique_dates) == 1:
+                        # 只有一天数据，无法计算涨跌幅，跳过
+                        continue
+                    else:
+                        continue # 没有数据，跳过
+                else:
+                    # 对于其他周期，选择周期内的数据
+                    if len(df) < 2:
+                        continue
+
+                    # 获取周期内的第一条和最后一条数据
+                    start_idx = max(0, len(df) - int(period))
+                    period_data = df.iloc[start_idx:]
+
+                    if len(period_data) < 2:
+                        continue
+
+                    first_record = period_data.iloc[0]  # 周期内较早的数据
+                    last_record = period_data.iloc[-1]  # 周期内最新的数据
+
+                # 检查收盘价是否为None
+                if first_record['close'] is None or last_record['close'] is None:
+                    continue
+
+                start_price = float(first_record['close'])
+                end_price = float(last_record['close'])
+
+                if start_price == 0:
+                    continue
+
+                change_pct = round(((end_price - start_price) / start_price) * 100, 2)
+
+                ranking_data.append({
+                    'industry_name': industry_name,
+                    'start_price': start_price,
+                    'end_price': end_price,
+                    'change_pct': change_pct,
+                    'start_date': str(first_record['date']),
+                    'end_date': str(last_record['date']),
+                    'volume': float(last_record['volume']) if last_record['volume'] and last_record['volume'] != '-' else 0
+                })
+                time.sleep(1)  # 每次请求后暂停1秒
+            except Exception as e:
+                logger.warning(f"获取行业 {industry_name} 的历史数据时出错: {str(e)}")
+                continue
+            finally:
+                # 更新处理计数
+                processed_count += 1
+
+                # 每处理一定数量的行业后输出进度
+                if processed_count % 10 == 0:
+                    logger.info(f"已处理 {processed_count}/{total_industries} 个行业")
+
+        # 添加延迟以避免过于频繁的API调用
+        time.sleep(1)  #
+
+        if ranking_data:
+            ranking_data.sort(key=lambda x: (x['change_pct'] is None, x['change_pct']), reverse=True)
+            set_industry_cache_data(cache_key, ranking_data)
+            logger.info(f"获取到 {len(ranking_data)} 个行业的 {period}天 涨跌幅排行数据")
+        return ranking_data
+    except Exception as e:
+        logger.error(f"获取新浪行业 {period}天 涨跌幅排行时出错: {str(e)}")
+        return []
+
+
+def get_industry_ranking_with_fallback(period="30"):
+    """
+    获取行业涨跌幅排行，带备选方案
+    """
+    try:
+        # 首先尝试使用原方法（东方财富）
+        ranking_data = get_industry_ranking_original(period)
+
+        if ranking_data and len(ranking_data) > 0:
+            logger.info("使用东方财富数据获取行业排行")
+            return ranking_data
+    except Exception as e:
+        logger.warning(f"东方财富行业数据获取失败: {e}")
+
+    try:
+        # 备选方案：新浪行业指数
+        ranking_data = get_sina_industry_ranking(period)
+
+        if ranking_data and len(ranking_data) > 0:
+            logger.info("使用新浪数据获取行业排行")
+            return ranking_data
+    except Exception as e:
+        logger.error(f"新浪行业数据获取失败: {e}")
+
+    # 如果所有方案都失败，返回空列表
+    logger.warning("所有行业数据源均不可用")
+    return []
+
+
+def get_industry_ranking(period="30"):
+    """
+    获取行业涨跌幅排行（增强版，包含备选方案）
+    """
+    cache_key = f"industry_ranking_{period}"
+    cached_data = get_industry_cached_data(cache_key)
+    if cached_data is not None:
+        logger.info(f"从缓存返回行业 {period}天 涨跌幅排行")
+        return cached_data
+
+    try:
+        logger.info(f"开始获取行业 {period}天 涨跌幅排行")
+
+        # 使用增强版函数获取数据
+        ranking_data = get_industry_ranking_with_fallback(period)
+
+        if ranking_data:
+            set_industry_cache_data(cache_key, ranking_data)
+            logger.info(f"获取到 {len(ranking_data)} 个行业的 {period}天 涨跌幅排行数据")
         return ranking_data
     except Exception as e:
         logger.error(f"获取行业 {period}天 涨跌幅排行时出错: {str(e)}")
@@ -267,23 +569,57 @@ def get_single_industry_history(industry_name, start_date, end_date):
     :param industry_name: 行业名称
     :param start_date: 开始日期
     :param end_date: 结束日期
-    :param period: 时间周期（用于缓存键）
     :return: 行业历史数据DataFrame
     """
-    cache_key = f"single_industry_history_{industry_name}_{start_date}_{end_date}"
+    # 优化缓存策略：使用更通用的缓存键，存储完整历史数据
+    # 这样可以复用已有的完整历史数据，避免重复调用API
+    cache_key = f"industry_full_history_{industry_name}"
+
+    # 首先尝试从缓存获取完整历史数据
     cached_data = get_industry_cached_data(cache_key)
     if cached_data is not None:
-        logger.debug(f"从缓存返回行业 {industry_name} 的历史数据")
+        logger.debug(f"从缓存返回行业 {industry_name} 的完整历史数据")
         # 将缓存的列表数据转换为DataFrame
         import pandas as pd
         if cached_data:
-            return pd.DataFrame(cached_data)
+            df = pd.DataFrame(cached_data)
+            # 如果有数据，根据日期范围筛选
+            if not df.empty and '日期' in df.columns:
+                # 筛选指定日期范围的数据
+                df['日期'] = pd.to_datetime(df['日期'])
+                mask = (df['日期'] >= pd.to_datetime(start_date)) & (df['日期'] <= pd.to_datetime(end_date))
+                filtered_df = df.loc[mask].copy()
+                # 重置索引
+                filtered_df.reset_index(drop=True, inplace=True)
+                return filtered_df
+            return df
         else:
-            return pd.DataFrame()    
+            return pd.DataFrame()
+
     try:
         # 获取该行业的历史数据，指定开始和结束日期
-        df = ak.stock_board_industry_hist_em(symbol=industry_name, start_date=start_date, end_date=end_date, adjust="")
-        # 缓存原始数据
+        # 注意：使用正确的参数名和默认值
+        df = ak.stock_board_industry_hist_em(symbol=industry_name, start_date=start_date, end_date=end_date, period="日k", adjust="")
+
+        # 检查返回的数据是否有效
+        if df is None:
+            logger.warning(f"行业 {industry_name} 返回了None数据")
+            return pd.DataFrame()
+
+        # 检查DataFrame是否为空或包含有效数据
+        if df.empty:
+            logger.warning(f"行业 {industry_name} 返回了空的DataFrame")
+            return pd.DataFrame()
+
+        # 检查是否包含必要的列
+        required_columns = ['日期', '开盘', '收盘', '最高', '最低']
+        if not all(col in df.columns for col in required_columns):
+            logger.warning(f"行业 {industry_name} 返回的数据缺少必要列: {list(df.columns)}")
+            return pd.DataFrame()
+
+        # 缓存原始数据（完整历史数据）
+        # 为了节省空间和提高效率，我们只缓存完整历史数据，而不是每次请求都缓存
+        # 但为了兼容性，我们仍然缓存当前请求的数据
         set_industry_cache_data(cache_key, df.to_dict('records'))
         return df
     except Exception as e:
@@ -292,9 +628,9 @@ def get_single_industry_history(industry_name, start_date, end_date):
         return pd.DataFrame()
 
 
-def get_multiple_industry_history(industry_names, period="365"):
+def get_industry_char_data_original(industry_names, period="365"):
     """
-    获取多个行业的历史数据，用于图表展示
+    获取多个行业的历史数据，用于图表展示（原始版本，使用东方财富数据）
     :param industry_names: 行业名称列表
     :param period: 时间周期（天数），如30, 90, 180, 365, 1825
     :return: 格式化的图表数据 {dates: [], series: {行业名: [数据]}}
@@ -302,84 +638,110 @@ def get_multiple_industry_history(industry_names, period="365"):
     if not industry_names or len(industry_names) == 0:
         logger.warning("未提供行业名称列表")
         return None
-    
+
     try:
         logger.info(f"开始获取 {len(industry_names)} 个行业的历史数据，周期: {period}天")
-        
+
         # 计算日期范围
-        current_date = datetime.now()
+        current_date = datetime.now() - timedelta(days=1)  # 使用前一天的数据，避免当天数据不完整
         end_date = current_date.strftime('%Y%m%d')
         start_date = (current_date - timedelta(days=int(period))).strftime('%Y%m%d')
-        
+
         # 存储所有行业的数据
         industry_data_dict = {}
         all_dates_set = set()
-        
+
         # 获取每个行业的历史数据
-        for industry_name in industry_names:
+        for idx, industry_name in enumerate(industry_names):
             try:
-                df = get_single_industry_history(industry_name=industry_name,start_date=start_date,end_date=end_date)
-                if df.empty:
-                    logger.warning(f"行业 {industry_name} 没有历史数据")
+                df = get_single_industry_history(industry_name, start_date, end_date)
+
+                # 检查DataFrame是否有效
+                if df is None or df.empty:
+                    logger.warning(f"行业 {industry_name} 没有历史数据或数据无效")
                     continue
-                
+
                 # 确保日期列是字符串格式
-                df['日期'] = pd.to_datetime(df['日期']).dt.strftime('%Y-%m-%d')
-                
+                if '日期' in df.columns:
+                    df['日期'] = pd.to_datetime(df['日期']).dt.strftime('%Y-%m-%d')
+                else:
+                    logger.warning(f"行业 {industry_name} 数据中没有'日期'列")
+                    continue
+
+                # 检查收盘价列是否存在
+                if '收盘' not in df.columns:
+                    logger.warning(f"行业 {industry_name} 数据中没有'收盘'列")
+                    continue
+
                 # 存储该行业的数据
                 industry_data_dict[industry_name] = df
-                
+
                 # 收集所有日期
-                all_dates_set.update(df['日期'].tolist())
-                
+                if '日期' in df.columns:
+                    all_dates_set.update(df['日期'].tolist())
+
                 logger.info(f"成功获取行业 {industry_name} 的 {len(df)} 条数据")
-                
+
+                time.sleep(1)  # 每次请求后暂停1秒
             except Exception as e:
                 logger.error(f"获取行业 {industry_name} 数据时出错: {str(e)}")
                 continue
-        
+
         if not industry_data_dict:
             logger.error("没有成功获取任何行业数据")
             return None
-        
+
         # 对所有日期排序
         all_dates = sorted(list(all_dates_set))
         logger.info(f"共有 {len(all_dates)} 个交易日")
-        
+
         # 构建返回数据结构
         chart_data = {
             "dates": all_dates,
             "series": {}
         }
-        
+
         # 为每个行业构建完整的数据序列
         for industry_name, df in industry_data_dict.items():
             # 创建日期到收盘价的映射
-            date_price_map = dict(zip(df['日期'], df['收盘']))
-            
+            date_price_map = {}
+            if '日期' in df.columns and '收盘' in df.columns:
+                date_price_map = dict(zip(df['日期'], df['收盘']))
+            else:
+                logger.warning(f"行业 {industry_name} 数据格式不正确，跳过该行业")
+                continue
+
             # 构建完整的价格序列（对缺失日期使用前一天的价格）
             price_series = []
             last_valid_price = None
-            
+
             # 首先找到起始价格作为基准
             base_price = None
             for date in all_dates:
-                if date in date_price_map and date_price_map[date] is not None and date_price_map[date] != 'None':
-                    base_price = float(date_price_map[date])
-                    break # 使用第一个可用的价格作为基准
-            
+                if date in date_price_map and date_price_map[date] is not None and str(date_price_map[date]) != 'None':
+                    try:
+                        base_price = float(date_price_map[date])
+                        break # 使用第一个可用的价格作为基准
+                    except (ValueError, TypeError):
+                        logger.warning(f"行业 {industry_name} 日期 {date} 的收盘价无法转换为浮点数: {date_price_map[date]}")
+                        continue
+
             for date in all_dates:
                 if date in date_price_map:
                     price = date_price_map[date]
-                    if price is not None and price != 'None':
-                        current_price = float(price)
-                        last_valid_price = current_price
-                        
-                        # 计算相对于起始价格的增长率
-                        if base_price is not None and base_price != 0:
-                            growth_rate = ((current_price - base_price) / base_price) * 100
-                            price_series.append(round(growth_rate, 2))
-                        else:
+                    if price is not None and str(price) != 'None':
+                        try:
+                            current_price = float(price)
+                            last_valid_price = current_price
+
+                            # 计算相对于起始价格的增长率
+                            if base_price is not None and base_price != 0:
+                                growth_rate = ((current_price - base_price) / base_price) * 100
+                                price_series.append(round(growth_rate, 2))
+                            else:
+                                price_series.append(None)
+                        except (ValueError, TypeError):
+                            logger.warning(f"行业 {industry_name} 日期 {date} 的收盘价无法转换为数字: {price}")
                             price_series.append(None)
                     elif last_valid_price is not None:
                         # 使用前向填充
@@ -399,65 +761,285 @@ def get_multiple_industry_history(industry_names, period="365"):
                         price_series.append(None)
                 else:
                     price_series.append(None)
-            
+
             chart_data["series"][industry_name] = price_series
-        
+
         logger.info(f"成功生成 {len(chart_data['series'])} 个行业的图表数据")
         return chart_data
 
     except Exception as e:
         logger.error(f"生成行业图表数据时出错: {str(e)}")
+        import traceback
+        logger.error(f"详细错误信息: {traceback.format_exc()}")
         return None
 
 
-def format_chart_data_for_echarts(chart_data):
+def get_sina_industry_char_data(industry_names, period="365"):
     """
-    将图表数据格式化为ECharts所需的格式
-    :param chart_data: 原始图表数据
-    :return: ECharts格式的数据
+    获取多个行业的历史数据，用于图表展示（使用新浪数据）
     """
-    if not chart_data:
+    if not industry_names or len(industry_names) == 0:
+        logger.warning("未提供行业名称列表")
         return None
-    
+
     try:
-        echarts_data = {
-            "xAxis": {
-                "data": chart_data["dates"]
-            },
-            "yAxis": {
-                "name": "增长率 (%)",
-                "axisLabel": {
-                    "formatter": "{value} %"
-                }
-            },
-            "series": []
+        logger.info(f"开始获取 {len(industry_names)} 个行业的历史数据，周期: {period}天")
+
+        # 计算日期范围
+        current_date = datetime.now() - timedelta(days=1)  # 使用前一天的数据，避免当天数据不完整
+        end_date = current_date.strftime('%Y%m%d')
+        start_date = (current_date - timedelta(days=int(period))).strftime('%Y%m%d')
+
+        # 存储所有行业的数据
+        industry_data_dict = {}
+        all_dates_set = set()
+
+        # 获取所有行业列表，建立名称到代码的映射
+        all_industries = get_sina_industry_names()
+        name_to_code = {item['板块名称']: item['代码'] for item in all_industries}
+
+        # 获取每个行业的历史数据
+        for idx, industry_name in enumerate(industry_names):
+            industry_code = name_to_code.get(industry_name)
+            if not industry_code:
+                logger.warning(f"找不到行业 {industry_name} 的代码")
+                continue
+
+            try:
+                df = get_sina_single_industry_history(industry_code, start_date, end_date)
+
+                # 检查DataFrame是否有效
+                if df is None or df.empty:
+                    logger.warning(f"行业 {industry_name} 没有历史数据或数据无效")
+                    continue
+
+                # 确保日期列是字符串格式
+                if 'date' in df.columns:
+                    df['date'] = pd.to_datetime(df['date']).dt.strftime('%Y-%m-%d')
+                else:
+                    logger.warning(f"行业 {industry_name} 数据中没有'date'列")
+                    continue
+
+                # 检查收盘价列是否存在
+                if 'close' not in df.columns:
+                    logger.warning(f"行业 {industry_name} 数据中没有'close'列")
+                    continue
+
+                # 存储该行业的数据
+                industry_data_dict[industry_name] = df
+
+                # 收集所有日期
+                if 'date' in df.columns:
+                    all_dates_set.update(df['date'].tolist())
+
+                logger.info(f"成功获取行业 {industry_name} 的 {len(df)} 条数据")
+
+                time.sleep(1)  # 每次请求后暂停1秒
+            except Exception as e:
+                logger.error(f"获取行业 {industry_name} 数据时出错: {str(e)}")
+                continue
+
+        if not industry_data_dict:
+            logger.error("没有成功获取任何行业数据")
+            return None
+
+        # 对所有日期排序
+        all_dates = sorted(list(all_dates_set))
+        logger.info(f"共有 {len(all_dates)} 个交易日")
+
+        # 构建返回数据结构
+        chart_data = {
+            "dates": all_dates,
+            "series": {}
         }
-        
-        # 为每个行业创建series配置
-        colors = [
-            '#ff4d4f', '#1890ff', '#52c41a', '#faad14', '#722ed1',
-            '#eb2f96', '#13c2c2', '#fa8c16', '#a0d911', '#2f54eb'
-        ]
-        
-        for idx, (industry_name, data) in enumerate(chart_data["series"].items()):
-            series_config = {
-                "name": industry_name,
-                "type": "line",
-                "data": data,
-                "smooth": True,
-                "symbol": "none",
-                "lineStyle": {
-                    "width": 2,
-                    "color": colors[idx % len(colors)]
-                }
-            }
-            echarts_data["series"].append(series_config)
-        
-        return echarts_data
-        
+
+        # 为每个行业构建完整的数据序列
+        for industry_name, df in industry_data_dict.items():
+            # 创建日期到收盘价的映射
+            date_price_map = {}
+            if 'date' in df.columns and 'close' in df.columns:
+                date_price_map = dict(zip(df['date'], df['close']))
+            else:
+                logger.warning(f"行业 {industry_name} 数据格式不正确，跳过该行业")
+                continue
+
+            # 构建完整的价格序列（对缺失日期使用前一天的价格）
+            price_series = []
+            last_valid_price = None
+
+            # 首先找到起始价格作为基准
+            base_price = None
+            for date in all_dates:
+                if date in date_price_map and date_price_map[date] is not None and str(date_price_map[date]) != 'None':
+                    try:
+                        base_price = float(date_price_map[date])
+                        break # 使用第一个可用的价格作为基准
+                    except (ValueError, TypeError):
+                        logger.warning(f"行业 {industry_name} 日期 {date} 的收盘价无法转换为浮点数: {date_price_map[date]}")
+                        continue
+
+            for date in all_dates:
+                if date in date_price_map:
+                    price = date_price_map[date]
+                    if price is not None and str(price) != 'None':
+                        try:
+                            current_price = float(price)
+                            last_valid_price = current_price
+
+                            # 计算相对于起始价格的增长率
+                            if base_price is not None and base_price != 0:
+                                growth_rate = ((current_price - base_price) / base_price) * 100
+                                price_series.append(round(growth_rate, 2))
+                            else:
+                                price_series.append(None)
+                        except (ValueError, TypeError):
+                            logger.warning(f"行业 {industry_name} 日期 {date} 的收盘价无法转换为数字: {price}")
+                            price_series.append(None)
+                    elif last_valid_price is not None:
+                        # 使用前向填充
+                        if base_price is not None and base_price != 0:
+                            growth_rate = ((last_valid_price - base_price) / base_price) * 100
+                            price_series.append(round(growth_rate, 2))
+                        else:
+                            price_series.append(None)
+                    else:
+                        price_series.append(None)
+                elif last_valid_price is not None:
+                    # 使用前向填充
+                    if base_price is not None and base_price != 0:
+                        growth_rate = ((last_valid_price - base_price) / base_price) * 100
+                        price_series.append(round(growth_rate, 2))
+                    else:
+                        price_series.append(None)
+                else:
+                    price_series.append(None)
+
+            chart_data["series"][industry_name] = price_series
+
+        logger.info(f"成功生成 {len(chart_data['series'])} 个行业的图表数据")
+        return chart_data
+
     except Exception as e:
-        logger.error(f"格式化ECharts数据时出错: {str(e)}")
+        logger.error(f"生成新浪行业图表数据时出错: {str(e)}")
+        import traceback
+        logger.error(f"详细错误信息: {traceback.format_exc()}")
         return None
+
+
+def get_industry_char_data_with_fallback(industry_names, period="365"):
+    """
+    获取行业图表数据，带备选方案
+    """
+    try:
+        # 首先尝试使用原方法（东方财富）
+        chart_data = get_industry_char_data_original(industry_names, period)
+
+        if chart_data:
+            logger.info("使用东方财富数据获取行业图表数据")
+            return chart_data
+    except Exception as e:
+        logger.warning(f"东方财富行业图表数据获取失败: {e}")
+
+    try:
+        # 备选方案：新浪行业指数
+        chart_data = get_sina_industry_char_data(industry_names, period)
+
+        if chart_data:
+            logger.info("使用新浪数据获取行业图表数据")
+            return chart_data
+    except Exception as e:
+        logger.error(f"新浪行业图表数据获取失败: {e}")
+
+    # 如果所有方案都失败，返回None
+    logger.warning("所有行业图表数据源均不可用")
+    return None
+
+
+def get_industry_char_data(industry_names, period="365"):
+    """
+    获取多个行业的历史数据，用于图表展示（增强版，包含备选方案）
+    :param industry_names: 行业名称列表
+    :param period: 时间周期（天数），如30, 90, 180, 365, 1825
+    :return: 格式化的图表数据 {dates: [], series: {行业名: [数据]}}
+    """
+    if not industry_names or len(industry_names) == 0:
+        logger.warning("未提供行业名称列表")
+        return None
+
+    # 生成缓存键
+    industry_str = '_'.join(sorted(industry_names))
+    cache_key = f"industry_char_data_{industry_str}_{period}"
+
+    # 尝试从缓存获取数据
+    cached_data = get_industry_cached_data(cache_key)
+    if cached_data is not None:
+        logger.info(f"从缓存返回行业图表数据: {industry_names}")
+        return cached_data
+
+    try:
+        logger.info(f"开始获取 {len(industry_names)} 个行业的历史数据，周期: {period}天")
+
+        # 使用增强版函数获取数据
+        chart_data = get_industry_char_data_with_fallback(industry_names, period)
+
+        if chart_data:
+            # 缓存数据
+            set_industry_cache_data(cache_key, chart_data)
+            logger.info(f"成功生成 {len(chart_data['series'])} 个行业的图表数据")
+        return chart_data
+    except Exception as e:
+        logger.error(f"获取行业图表数据时出错: {str(e)}")
+        return None
+
+
+# def format_chart_data_for_echarts(chart_data):
+#     """
+#     将图表数据格式化为ECharts所需的格式
+#     :param chart_data: 原始图表数据
+#     :return: ECharts格式的数据
+#     """
+#     if not chart_data:
+#         return None
+    
+#     try:
+#         echarts_data = {
+#             "xAxis": {
+#                 "data": chart_data["dates"]
+#             },
+#             "yAxis": {
+#                 "name": "增长率 (%)",
+#                 "axisLabel": {
+#                     "formatter": "{value} %"
+#                 }
+#             },
+#             "series": []
+#         }
+        
+#         # 为每个行业创建series配置
+#         colors = [
+#             '#ff4d4f', '#1890ff', '#52c41a', '#faad14', '#722ed1',
+#             '#eb2f96', '#13c2c2', '#fa8c16', '#a0d911', '#2f54eb'
+#         ]
+        
+#         for idx, (industry_name, data) in enumerate(chart_data["series"].items()):
+#             series_config = {
+#                 "name": industry_name,
+#                 "type": "line",
+#                 "data": data,
+#                 "smooth": True,
+#                 "symbol": "none",
+#                 "lineStyle": {
+#                     "width": 2,
+#                     "color": colors[idx % len(colors)]
+#                 }
+#             }
+#             echarts_data["series"].append(series_config)
+        
+#         return echarts_data
+        
+#     except Exception as e:
+#         logger.error(f"格式化ECharts数据时出错: {str(e)}")
+#         return None
 
 
 

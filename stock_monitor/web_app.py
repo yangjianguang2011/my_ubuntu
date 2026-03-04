@@ -10,6 +10,8 @@ import logging
 from datetime import datetime
 from flask import Flask, render_template, request, jsonify
 from logger_config import logger,gconfig
+from stock_data_fetcher import get_stock_info
+from trend_trading_analyzer import TrendTradingAnalyzer
 
 # 配置文件路径 - 使用基于当前文件的绝对路径
 TEMPLATE_DIR = gconfig.get('web_template_dir', './web_templates')
@@ -32,21 +34,21 @@ def warmup_cache():
     try:
         logger.info("手动触发缓存预热...")
         
-        # 预加载分析师数据
-        from analyst_data_fetcher import get_combined_analyst_data
-        from industry_data_fetcher import get_industry_ranking
-        from index_data_fetcher import get_main_index_list, get_index_ranking, get_index_history, get_multiple_index_history, calculate_growth_rate
-        analyst_data = get_combined_analyst_data(top_analysts=20, top_stocks=50, period="3个月")
-        industry_data = get_industry_ranking(period="30")
-        index_data = get_main_index_list()  # 预加载指数数据
+        # # 预加载分析师数据
+        # from analyst_data_fetcher import get_combined_analyst_data
+        # from industry_data_fetcher import get_industry_ranking
+        # from index_data_fetcher import get_index_selected_list, get_index_ranking, get_index_history, get_multiple_index_history, calculate_growth_rate
+        # analyst_data = get_combined_analyst_data(top_analysts=20, top_stocks=50, period="3个月")
+        # industry_data = get_industry_ranking(period="30")
+        # index_data = get_index_selected_list()  # 预加载指数数据
         
-        return jsonify({
-            "success": True,
-            "message": "缓存预热完成",
-            "analyst_data_count": len(analyst_data.get('top_focus_stocks', [])),
-            "industry_data_count": len(industry_data),
-            "index_data_count": len(index_data)
-        })
+        # return jsonify({
+        #     "success": True,
+        #     "message": "缓存预热完成",
+        #     "analyst_data_count": len(analyst_data.get('top_focus_stocks', [])),
+        #     "industry_data_count": len(industry_data),
+        #     "index_data_count": len(index_data)
+        # })
     except Exception as e:
         logger.error(f"缓存预热失败: {str(e)}")
         return jsonify({
@@ -211,35 +213,30 @@ def get_analyst_focus_stocks_api():
     try:
         # 获取查询参数
         period = request.args.get('period', '3个月')
-        top_analysts = request.args.get('top_analysts', 20)
+        top_analysts = request.args.get('top_analysts', 50)
         top_stocks = request.args.get('top_stocks', 50)
-        
+
         # 处理 'all' 参数
         if top_analysts == 'all':
             top_analysts = 100  #   使用一个大数来获取所有分析师
         else:
             top_analysts = int(top_analysts)
-            
+
         if top_stocks == 'all':
             top_stocks = 9999  # 使用一个大数来获取所有股票
         else:
             top_stocks = int(top_stocks)
-        
+
         logger.info(f"请求分析师重点关注股票，周期: {period}, 前{top_analysts}名分析师, 前{top_stocks}只股票")
-        
-        # 使用analyst_data_fetcher中的优化函数获取数据
-        from analyst_data_fetcher import get_combined_analyst_data
-        result = get_combined_analyst_data(top_analysts=top_analysts, top_stocks=top_stocks, period=period)
-        
-        # 提取重点关注股票数据
-        focus_stocks_result = {
-            'top_focus_stocks': result.get('top_focus_stocks', []),
-            'total_analysts_processed': result.get('total_analysts_processed', 0),
-            'total_unique_stocks': result.get('total_unique_stocks', 0),
-            'latest_unique_stocks': result.get('latest_unique_stocks', 0),
-            'latest_focus_stocks': result.get('latest_focus_stocks', 0)
-        }
-        
+
+        # 使用analyst_data_fetcher中的函数获取数据
+        from analyst_data_fetcher import get_analyst_focus_stocks
+        focus_stocks_result = get_analyst_focus_stocks(
+            top_analysts=top_analysts,
+            top_stocks=top_stocks,
+            period=period
+        )
+
         if focus_stocks_result:
             return jsonify({
                 "success": True,
@@ -261,76 +258,18 @@ def get_analyst_focus_stocks_api():
             "message": f"获取分析师重点关注股票失败: {str(e)}"
         }), 500
 
-@app.route('/api/analyst/latest_tracking', methods=['GET'])
-def get_latest_analyst_tracking_api():
-    """获取最新跟踪成份股数据"""
-    try:
-        # 获取查询参数
-        period = request.args.get('period', '3个月')
-        top_analysts = request.args.get('top_analysts', 20)
-        top_stocks = request.args.get('top_stocks', 50)  # 添加top_stocks参数
-        
-        # 处理 'all' 参数
-        if top_analysts == 'all':
-            top_analysts = 999  # 使用一个大数来获取所有分析师
-        else:
-            top_analysts = int(top_analysts)
-            
-        if top_stocks == 'all':
-            top_stocks = 9999  # 使用一个大数来获取所有股票
-        else:
-            top_stocks = int(top_stocks)
-        
-        logger.info(f"请求最新跟踪成份股数据，周期: {period}, 前{top_analysts}名分析师, 前{top_stocks}只股票")
-        
-        # 使用analyst_data_fetcher中的优化函数获取数据
-        from analyst_data_fetcher import get_combined_analyst_data
-        result = get_combined_analyst_data(top_analysts=top_analysts, top_stocks=top_stocks, period=period)
-        
-        # 提取最新跟踪数据
-        latest_tracking_data = result.get('latest_tracking', [])
-        
-        if result is not None:
-            return jsonify({
-                "success": True,
-                "data": latest_tracking_data,
-                "period": period,
-                "top_analysts": top_analysts,
-                "top_stocks": top_stocks
-            })
-        else:
-            return jsonify({
-                "success": False,
-                "message": f"未能获取最新跟踪成份股数据，周期: {period}"
-            }), 404
 
-    except Exception as e:
-        logger.error(f"获取最新跟踪成份股数据失败: {str(e)}")
-        return jsonify({
-            "success": False,
-            "message": f"获取最新跟踪成份股数据失败: {str(e)}"
-        }), 500
-
-@app.route('/api/analyst/recently_updated_stocks', methods=['GET'])
-def get_recently_updated_stocks_api():
+@app.route('/api/analyst/updated_stocks', methods=['GET'])
+def get_analyst_updated_stocks_api():
     """获取最近更新的股票数据"""
     try:
         # 获取查询参数
-        days = request.args.get('days')  # 天数参数，表示最近几天内更新的股票
-        if not days:
-            # 如果没有提供天数，使用默认值（最近7天）
-            days = 7
-        else:
-            try:
-                days = int(days)
-            except ValueError:
-                days = 7  # 如果参数不是有效的整数，使用默认值
-
+        days = int(request.args.get('days'))  # 天数参数，表示最近几天内更新的股票
         logger.info(f"请求最近更新的股票数据，天数: {days}")
 
         # 调用analyst_data_fetcher中的函数获取数据
-        from analyst_data_fetcher import get_recently_updated_stocks
-        stocks_data = get_recently_updated_stocks(days=days)
+        from analyst_data_fetcher import get_analyst_updated_stocks
+        stocks_data = get_analyst_updated_stocks(days=days)
 
         if stocks_data is not None:
             # 计算日期阈值用于返回给前端
@@ -355,156 +294,9 @@ def get_recently_updated_stocks_api():
             "message": f"获取最近更新的股票数据失败: {str(e)}"
         }), 500
 
-@app.route('/api/analyst/stock_growth_comparison', methods=['GET'])
-def get_stock_growth_comparison_api():
-    """获取股票成长对比数据"""
-    try:
-        # 获取查询参数
-        symbol = request.args.get('symbol')
-        if not symbol:
-            return jsonify({
-                "success": False,
-                "message": "缺少股票代码参数"
-            }), 400
-
-        logger.info(f"请求股票 {symbol} 的成长对比数据")
-
-        # 调用analyst_data_fetcher中的函数获取数据
-        from analyst_data_fetcher import get_stock_growth_comparison
-        data = get_stock_growth_comparison(symbol)
-
-        if data is not None:
-            return jsonify({
-                "success": True,
-                "data": data,
-                "symbol": symbol
-            })
-        else:
-            return jsonify({
-                "success": False,
-                "message": f"未能获取股票 {symbol} 的成长对比数据"
-            }), 404
-
-    except Exception as e:
-        logger.error(f"获取股票 {symbol} 的成长对比数据失败: {str(e)}")
-        return jsonify({
-            "success": False,
-            "message": f"获取股票 {symbol} 的成长对比数据失败: {str(e)}"
-        }), 500
-
-@app.route('/api/analyst/stock_valuation_comparison', methods=['GET'])
-def get_stock_valuation_comparison_api():
-    """获取股票估值对比数据"""
-    try:
-        # 获取查询参数
-        symbol = request.args.get('symbol')
-        if not symbol:
-            return jsonify({
-                "success": False,
-                "message": "缺少股票代码参数"
-            }), 400
-
-        logger.info(f"请求股票 {symbol} 的估值对比数据")
-
-        # 调用analyst_data_fetcher中的函数获取数据
-        from analyst_data_fetcher import get_stock_valuation_comparison
-        data = get_stock_valuation_comparison(symbol)
-
-        if data is not None:
-            return jsonify({
-                "success": True,
-                "data": data,
-                "symbol": symbol
-            })
-        else:
-            return jsonify({
-                "success": False,
-                "message": f"未能获取股票 {symbol} 的估值对比数据"
-            }), 404
-
-    except Exception as e:
-        logger.error(f"获取股票 {symbol} 的估值对比数据失败: {str(e)}")
-        return jsonify({
-            "success": False,
-            "message": f"获取股票 {symbol} 的估值对比数据失败: {str(e)}"
-        }), 500
-
-@app.route('/api/analyst/stock_dupont_comparison', methods=['GET'])
-def get_stock_dupont_comparison_api():
-    """获取股票杜邦分析对比数据"""
-    try:
-        # 获取查询参数
-        symbol = request.args.get('symbol')
-        if not symbol:
-            return jsonify({
-                "success": False,
-                "message": "缺少股票代码参数"
-            }), 400
-
-        logger.info(f"请求股票 {symbol} 的杜邦分析对比数据")
-
-        # 调用analyst_data_fetcher中的函数获取数据
-        from analyst_data_fetcher import get_stock_dupont_comparison
-        data = get_stock_dupont_comparison(symbol)
-
-        if data is not None:
-            return jsonify({
-                "success": True,
-                "data": data,
-                "symbol": symbol
-            })
-        else:
-            return jsonify({
-                "success": False,
-                "message": f"未能获取股票 {symbol} 的杜邦分析对比数据"
-            }), 404
-
-    except Exception as e:
-        logger.error(f"获取股票 {symbol} 的杜邦分析对比数据失败: {str(e)}")
-        return jsonify({
-            "success": False,
-            "message": f"获取股票 {symbol} 的杜邦分析对比数据失败: {str(e)}"
-        }), 500
-
-@app.route('/api/analyst/stock_peer_comparison', methods=['GET'])
-def get_stock_peer_comparison_api():
-    """获取股票所有同行比较数据（成长性、估值、杜邦分析）"""
-    try:
-        # 获取查询参数
-        symbol = request.args.get('symbol')
-        if not symbol:
-            return jsonify({
-                "success": False,
-                "message": "缺少股票代码参数"
-            }), 400
-
-        logger.info(f"请求股票 {symbol} 的所有同行比较数据")
-
-        # 调用analyst_data_fetcher中的函数获取数据
-        from analyst_data_fetcher import get_stock_peer_comparison_all
-        data = get_stock_peer_comparison_all(symbol)
-
-        if data is not None:
-            return jsonify({
-                "success": True,
-                "data": data,
-                "symbol": symbol
-            })
-        else:
-            return jsonify({
-                "success": False,
-                "message": f"未能获取股票 {symbol} 的所有同行比较数据"
-            }), 404
-
-    except Exception as e:
-        logger.error(f"获取股票 {symbol} 的所有同行比较数据失败: {str(e)}")
-        return jsonify({
-            "success": False,
-            "message": f"获取股票 {symbol} 的所有同行比较数据失败: {str(e)}"
-        }), 500
 
 @app.route('/api/analyst/history_tracking', methods=['GET'])
-def get_stock_analyst_history_tracking():
+def get_analyst_history_tracking_api():
     """获取股票历史分析师跟踪数据"""
     try:
         stock_code = request.args.get('stock_code')
@@ -517,8 +309,8 @@ def get_stock_analyst_history_tracking():
             }), 400
             
         # 调用分析师数据获取函数
-        from analyst_data_fetcher import get_stock_analyst_history_tracking
-        history_data = get_stock_analyst_history_tracking(stock_code, int(days))
+        from analyst_data_fetcher import get_analyst_history_tracking
+        history_data = get_analyst_history_tracking(stock_code, int(days))
         
         if history_data:
             return jsonify({
@@ -539,8 +331,60 @@ def get_stock_analyst_history_tracking():
             "message": f"获取股票历史跟踪数据失败: {str(e)}"
         }), 500
 
+
+@app.route('/api/analyst/latest_tracking', methods=['GET'])
+def get_analyst_latest_tracking_api():
+    """获取最新跟踪成份股数据"""
+    try:
+        # 获取查询参数
+        period = request.args.get('period', '3个月')
+        top_analysts = request.args.get('top_analysts', 50)
+        top_stocks = request.args.get('top_stocks', 50)  # 添加top_stocks参数
+
+        # 处理 'all' 参数
+        if top_analysts == 'all':
+            top_analysts = 999  # 使用一个大数来获取所有分析师
+        else:
+            top_analysts = int(top_analysts)
+
+        if top_stocks == 'all':
+            top_stocks = 9999  # 使用一个大数来获取所有股票
+        else:
+            top_stocks = int(top_stocks)
+
+        logger.info(f"请求最新跟踪成份股数据，周期: {period}, 前{top_analysts}名分析师, 前{top_stocks}只股票")
+
+        # 使用analyst_data_fetcher中的函数获取数据
+        from analyst_data_fetcher import get_analyst_latest_tracking
+        latest_tracking_data = get_analyst_latest_tracking(
+            top_analysts=top_analysts,
+            top_stocks=top_stocks,
+            period=period
+        )
+
+        if latest_tracking_data is not None:
+            return jsonify({
+                "success": True,
+                "data": latest_tracking_data,
+                "period": period,
+                "top_analysts": top_analysts,
+                "top_stocks": top_stocks
+            })
+        else:
+            return jsonify({
+                "success": False,
+                "message": f"未能获取最新跟踪成份股数据，周期: {period}"
+            }), 404
+
+    except Exception as e:
+        logger.error(f"获取最新跟踪成份股数据失败: {str(e)}")
+        return jsonify({
+            "success": False,
+            "message": f"获取最新跟踪成份股数据失败: {str(e)}"
+        }), 500
+
 ################################################ industry APIs ##################################################
-@app.route('/api/industry_chart_data', methods=['POST'])
+@app.route('/api/industry/char_data', methods=['POST'])
 def get_industry_chart_data_api():
     """获取行业图表数据（用于ECharts展示）"""
     try:
@@ -570,8 +414,8 @@ def get_industry_chart_data_api():
         logger.info(f"请求行业图表数据，行业: {industry_names}, 周期: {period}天")
         
         # 获取图表数据
-        from industry_data_fetcher import get_multiple_industry_history
-        chart_data = get_multiple_industry_history(industry_names, period)
+        from industry_data_fetcher import get_industry_char_data
+        chart_data = get_industry_char_data(industry_names, period)
         
         if chart_data:
             return jsonify({
@@ -586,19 +430,18 @@ def get_industry_chart_data_api():
             }), 500
             
     except Exception as e:
-        logger.error(f"获取行业图表数据失败: {str(e)}")
+        logger.error(f"获取行业图表数据异常: {str(e)}")
         return jsonify({
             "success": False,
-            "message": f"获取行业图表数据失败: {str(e)}"
+            "message": f"获取行业图表数据异常: {str(e)}"
         }), 500
 
-@app.route('/api/industry_data', methods=['GET'])
-def get_industry_data():
+@app.route('/api/industry/ranking_data', methods=['GET'])
+def get_industry_ranking_data_api():
     """获取行业板块数据"""
     try:
         # 获取查询参数
         period = request.args.get('period', '30')  # 默认30天
-        sector = request.args.get('sector', 'all')  # 默认所有行业
         top_n = request.args.get('top_n', '20')  # 默认前20个
         
         # 验证周期参数
@@ -608,7 +451,7 @@ def get_industry_data():
 
         # 获取行业排行数据
         from industry_data_fetcher import get_industry_ranking
-        logger.info(f"请求行业数据，周期: {period}天, 行业: {sector}, 前N个: {top_n}")
+        logger.info(f"请求行业数据，周期: {period}天, 前N个: {top_n}")
 
         ranking_data = get_industry_ranking(period)
         
@@ -633,7 +476,6 @@ def get_industry_data():
                 "top_losers": top_losers,    # 跌幅前N个
                 "total_count": len(ranking_data),
                 "period": period,
-                "sector": sector
             },
             "message": f"获取行业{period}天涨跌幅排行成功"
         })
@@ -643,7 +485,7 @@ def get_industry_data():
             "message": f"获取行业数据失败: {str(e)}"
         }), 500
 
-@app.route('/api/industry_constituents', methods=['GET'])
+@app.route('/api/industry/constituents', methods=['GET'])
 def get_industry_constituents():
     """获取行业成份股数据"""
     try:
@@ -679,14 +521,14 @@ def get_industry_constituents():
         }), 500
 
 ################################################ index APIs ##################################################
-@app.route('/api/index_list', methods=['GET'])
-def get_index_list_api():
-    from index_data_fetcher import get_main_index_list
-    """获取主要指数列表"""
+@app.route('/api/index/dynamic_list', methods=['GET'])
+def get_index_dynamic_list_api():
+    from index_data_fetcher import get_index_dynamic_list
+    """获取主要指数列表用于显示基金走势对比图"""
     try:
         sort_by_change = request.args.get('sort', 'none')  # 'none', 'change_asc', 'change_desc'
         logger.info(f"请求主要指数列表，排序方式: {sort_by_change}")
-        index_list = get_main_index_list()
+        index_list = get_index_dynamic_list(top_n=28)  # 获取动态选择的主要指数列表
 
         if index_list:
             # 根据参数决定是否按涨跌幅排序
@@ -714,37 +556,36 @@ def get_index_list_api():
             "message": f"获取主要指数列表失败: {str(e)}"
         }), 500
 
-@app.route('/api/index_ranking', methods=['GET'])
+@app.route('/api/index/ranking', methods=['GET'])
 def get_index_ranking_api():
     """获取指数涨跌幅排名"""
     try:
-        # 获取查询参数
-        top_n = request.args.get('top_n', '20')  # 默认前20个
+        top_n = request.args.get('top_n', '28')  # 默认前28个
         period = request.args.get('period', '30')  # 默认30天周期
+
+        # 将字符串参数转换为整数，使用默认值处理无效输入
         try:
             top_n = int(top_n)
-        except ValueError:
-            top_n = 20  # 如果转换失败，使用默认值
+        except (ValueError, TypeError):
+            top_n = 28  # 如果转换失败，使用默认值
             logger.warning(f"top_n 参数无效，使用默认值: {top_n}")
         try:
             period = int(period)
-        except ValueError:
+        except (ValueError, TypeError):
             period = 30  # 如果转换失败，使用默认值
             logger.warning(f"period 参数无效，使用默认值: {period}")
 
         logger.info(f"请求指数涨跌幅排名，前N个: {top_n}, 周期: {period}天")
-        from index_data_fetcher import get_index_ranking, get_index_ranking_optimized
-        # 获取use_sina_ranking参数
-        use_sina_ranking = request.args.get('use_sina_ranking', 'false').lower() == 'true'
-        ranking_data = get_index_ranking_optimized(period_days=period, use_sina_ranking=use_sina_ranking)
+
+        from index_data_fetcher import get_index_ranking
+        ranking_data = get_index_ranking(period_days=period)
         logger.info(f"获取到 {len(ranking_data) if ranking_data else 0} 条指数排名数据")
-        
+
         if not ranking_data or len(ranking_data) == 0:
             return jsonify({
                 "success": True,  # 改为返回成功但无数据，避免前端错误
                 "data": {
                     "top_gainers": [],
-                    "top_losers": [],
                     "total_count": 0,
                     "top_n": top_n,
                     "period": period
@@ -752,20 +593,14 @@ def get_index_ranking_api():
                 "message": "暂无指数排名数据"
             })
 
-        # 根据涨跌幅排序后取前N个
-        top_ranking = ranking_data[:top_n]
-        logger.info(f"选取前 {len(top_ranking)} 名指数作为涨幅榜")
-        
-        # 分离涨幅和跌幅前N个
-        top_gainers = top_ranking[:top_n] # 涨幅前N个（已按涨幅排序）
-        top_losers = sorted(ranking_data, key=lambda x: x['change_percent'], reverse=False)[:top_n]  # 跌幅前N个
-        logger.info(f"涨幅榜: {len(top_gainers)} 个，跌幅榜: {len(top_losers)} 个")
+        # 取前N个指数作为涨幅榜（数据已按涨幅排序）
+        top_gainers = ranking_data[:top_n]
+        logger.info(f"选取前 {len(top_gainers)} 名指数作为涨幅榜")
 
         return jsonify({
-            "success": True, 
+            "success": True,
             "data": {
                 "top_gainers": top_gainers,  # 涨幅前N个
-                "top_losers": top_losers,    # 跌幅前N个
                 "total_count": len(ranking_data),
                 "top_n": top_n,
                 "period": period
@@ -775,48 +610,48 @@ def get_index_ranking_api():
     except Exception as e:
         logger.error(f"获取指数排名数据失败: {str(e)}", exc_info=True)
         return jsonify({
-            "success": False, 
+            "success": False,
             "message": f"获取指数排名数据失败: {str(e)}"
         }), 500
 
-@app.route('/api/index_history', methods=['GET'])
-def get_index_history_api():
-    """获取单个指数历史数据"""
-    try:
-        # 获取查询参数
-        symbol = request.args.get('symbol', '')
-        period = request.args.get('period', '12M')  # 默认12个月
+# @app.route('/api/index_history', methods=['GET'])
+# def get_index_history_api():
+#     """获取单个指数历史数据"""
+#     try:
+#         # 获取查询参数
+#         symbol = request.args.get('symbol', '')
+#         period = request.args.get('period', '12M')  # 默认12个月
         
-        if not symbol:
-            return jsonify({
-                "success": False,
-                "message": "缺少指数代码参数"
-            }), 400
+#         if not symbol:
+#             return jsonify({
+#                 "success": False,
+#                 "message": "缺少指数代码参数"
+#             }), 400
 
-        logger.info(f"请求指数历史数据，代码: {symbol}, 周期: {period}")
-        history_data = get_index_history(symbol, period)
+#         logger.info(f"请求指数历史数据，代码: {symbol}, 周期: {period}")
+#         history_data = get_index_history(symbol, period)
         
-        if history_data:
-            return jsonify({
-                "success": True,
-                "data": history_data,
-                "symbol": symbol,
-                "period": period,
-                "message": f"成功获取指数 {symbol} 的 {len(history_data)} 条历史数据"
-            })
-        else:
-            return jsonify({
-                "success": False,
-                "message": f"暂无指数 {symbol} 的历史数据"
-            }), 404
-    except Exception as e:
-        logger.error(f"获取指数历史数据失败: {str(e)}")
-        return jsonify({
-            "success": False,
-            "message": f"获取指数历史数据失败: {str(e)}"
-        }), 500
+#         if history_data:
+#             return jsonify({
+#                 "success": True,
+#                 "data": history_data,
+#                 "symbol": symbol,
+#                 "period": period,
+#                 "message": f"成功获取指数 {symbol} 的 {len(history_data)} 条历史数据"
+#             })
+#         else:
+#             return jsonify({
+#                 "success": False,
+#                 "message": f"暂无指数 {symbol} 的历史数据"
+#             }), 404
+#     except Exception as e:
+#         logger.error(f"获取指数历史数据失败: {str(e)}")
+#         return jsonify({
+#             "success": False,
+#             "message": f"获取指数历史数据失败: {str(e)}"
+#         }), 500
 
-@app.route('/api/index_chart_data', methods=['POST'])
+@app.route('/api/index/chart_data', methods=['POST'])
 def get_index_chart_data_api():
     """获取指数图表数据（用于ECharts展示）"""
     try:
@@ -825,92 +660,27 @@ def get_index_chart_data_api():
         symbols = data.get('symbols', [])
         period = data.get('period', '12M')
         use_growth_rate = data.get('use_growth_rate', True)  # 是否使用增长率对比
-        
+
         # 验证参数
         if not symbols or len(symbols) == 0:
             return jsonify({
                 "success": False,
                 "message": "请至少选择一个指数"
             }), 400
-        
+
         if len(symbols) > 10:
             return jsonify({
                 "success": False,
                 "message": "最多只能选择10个指数进行对比"
             }), 400
-        
+
         logger.info(f"请求指数图表数据，指数: {symbols}, 周期: {period}, 使用增长率: {use_growth_rate}")
-        
-        # 获取多个指数历史数据
-        from index_data_fetcher import get_multiple_index_history, calculate_growth_rate
-        multi_history_data = get_multiple_index_history(symbols, period)
-        if not multi_history_data:
-            return jsonify({
-                "success": False,
-                "message": "获取指数历史数据失败"
-            }), 500
-        
-        # 构建图表数据格式
-        chart_data = {
-            "dates": [],
-            "series": []
-        }
-        
-        # 收集所有日期并去重排序
-        all_dates = set()
-        for symbol, history in multi_history_data.items():
-            for item in history:
-                all_dates.add(item['date'])
-        chart_data["dates"] = sorted(list(all_dates))
-        
-        # 为每个指数生成系列数据
-        for symbol in symbols:
-            if symbol in multi_history_data:
-                history = multi_history_data[symbol]
-                # 为了匹配日期轴，创建完整的数据序列（缺失日期填充为None）
-                series_data = []
-                date_to_value = {item['date']: item for item in history}
-                
-                if use_growth_rate and len(history) > 0:
-                    # 使用增长率计算
-                    growth_rates = calculate_growth_rate(history)
-                    # 将增长率映射到对应日期
-                    date_to_growth = {item['date']: item['growth_rate'] for item in growth_rates}
-                    for date in chart_data["dates"]:
-                        if date in date_to_growth:
-                            series_data.append(date_to_growth[date])
-                        else:
-                            series_data.append(None)
-                else:
-                    # 使用原始价格数据
-                    for date in chart_data["dates"]:
-                        if date in date_to_value:
-                            series_data.append(date_to_value[date]['close'])
-                        else:
-                            series_data.append(None)
-                
-                # 获取指数名称
-                index_name = symbol
-                for idx in [{"symbol": "000001", "name": "上证指数", "code": "sh000001"},
-                            {"symbol": "000300", "name": "沪深300", "code": "sh000300"},
-                            {"symbol": "000905", "name": "中证500", "code": "sh000905"},
-                            {"symbol": "399006", "name": "创业板指", "code": "sz399006"},
-                            {"symbol": "000688", "name": "科创50", "code": "sh000688"},
-                            {"symbol": "000016", "name": "上证50", "code": "sh000016"},
-                            {"symbol": "399005", "name": "中小板指", "code": "sz399005"},
-                            {"symbol": "000852", "name": "中证1000", "code": "sh000852"},
-                            {"symbol": "931071", "name": "国证2000", "code": "sz931071"},
-                            {"symbol": "000010", "name": "上证180", "code": "sh000010"}]:
-                    if idx['symbol'] == symbol or idx['code'] == symbol:
-                        index_name = idx['name']
-                        break
-                
-                chart_data["series"].append({
-                    "name": index_name,
-                    "data": series_data
-                })
-        
-        if chart_data["series"]:
+
+        # 使用index_data_fetcher中的函数准备图表数据
+        from index_data_fetcher import get_index_chart_data
+        chart_data = get_index_chart_data(symbols, period, use_growth_rate)
+
+        if chart_data and chart_data.get("series"):
             return jsonify({
                 "success": True,
                 "data": chart_data,
@@ -921,12 +691,199 @@ def get_index_chart_data_api():
                 "success": False,
                 "message": "构建指数图表数据失败"
             }), 500
-            
+
     except Exception as e:
         logger.error(f"获取指数图表数据失败: {str(e)}", exc_info=True)
         return jsonify({
             "success": False,
             "message": f"获取指数图表数据失败: {str(e)}"
+        }), 500
+
+
+################################################ fund APIs ##################################################
+@app.route('/api/fund/list', methods=['GET'])
+def get_fund_list_api():
+    """获取基金列表"""
+    try:
+        sort_by_change = request.args.get('sort', 'none')  # 'none', 'change_asc', 'change_desc'
+        logger.info(f"请求基金列表，排序方式: {sort_by_change}")
+
+        from fund_data_fetcher import get_selected_fund_list
+        fund_list = get_selected_fund_list()
+
+        if fund_list:
+            # 根据参数决定是否按涨跌幅排序
+            # 注意：这里我们只是返回基金列表，实际的涨跌幅计算在排名API中进行
+            return jsonify({
+                "success": True,
+                "data": fund_list,
+                "message": f"成功获取 {len(fund_list)} 个基金数据"
+            })
+        else:
+            return jsonify({
+                "success": False,
+                "message": "暂无基金数据"
+            }), 404
+    except Exception as e:
+        logger.error(f"获取基金列表失败: {str(e)}")
+        return jsonify({
+            "success": False,
+            "message": f"获取基金列表失败: {str(e)}"
+        }), 500
+
+
+@app.route('/api/fund/dynamic_list', methods=['GET'])
+def get_fund_dynamic_list_api():
+    """获取动态选择的基金列表（基于收益率排名）
+        用于显示基金走势对比图
+    """
+    try:
+        top_n = request.args.get('top_n', '28')  # 默认前28个
+        period = request.args.get('period', '30D')  # 默认30天周期
+        sort_by_change = request.args.get('sort', 'none')  # 'none', 'change_asc', 'change_desc'
+
+        # 将字符串参数转换为适当的类型
+        try:
+            top_n = int(top_n)
+        except (ValueError, TypeError):
+            top_n = 28  # 如果转换失败，使用默认值
+            logger.warning(f"top_n 参数无效，使用默认值: {top_n}")
+
+        logger.info(f"请求动态基金列表，前N个: {top_n}, 周期: {period}, 排序方式: {sort_by_change}")
+
+        from fund_data_fetcher import get_fund_dynamic_list
+        fund_list = get_fund_dynamic_list(top_n=top_n, period=period)
+
+        if fund_list:
+            # 根据参数决定是否按涨跌幅排序
+            if sort_by_change == 'change_desc':
+                # 按涨跌幅降序排列
+                fund_list.sort(key=lambda x: x['change_percent'], reverse=True)
+            elif sort_by_change == 'change_asc':
+                # 按涨跌幅升序排列
+                fund_list.sort(key=lambda x: x['change_percent'])
+
+            return jsonify({
+                "success": True,
+                "data": fund_list,
+                "message": f"成功获取 {len(fund_list)} 个动态基金数据"
+            })
+        else:
+            return jsonify({
+                "success": False,
+                "message": "暂无基金数据"
+            }), 404
+    except Exception as e:
+        logger.error(f"获取动态基金列表失败: {str(e)}")
+        return jsonify({
+            "success": False,
+            "message": f"获取动态基金列表失败: {str(e)}"
+        }), 500
+
+
+@app.route('/api/fund/ranking', methods=['GET'])
+def get_fund_ranking_api():
+    """获取基金涨跌幅排名"""
+    try:
+        top_n = request.args.get('top_n', '28')  # 默认前28个
+        period = request.args.get('period', '30')  # 默认30天周期
+
+        # 将字符串参数转换为整数，使用默认值处理无效输入
+        try:
+            top_n = int(top_n)
+        except (ValueError, TypeError):
+            top_n = 28  # 如果转换失败，使用默认值
+            logger.warning(f"top_n 参数无效，使用默认值: {top_n}")
+        try:
+            period = int(period)
+        except (ValueError, TypeError):
+            period = 30  # 如果转换失败，使用默认值
+            logger.warning(f"period 参数无效，使用默认值: {period}")
+
+        logger.info(f"请求基金涨跌幅排名，前N个: {top_n}, 周期: {period}天")
+
+        from fund_data_fetcher import get_fund_ranking
+        ranking_data = get_fund_ranking(period=f"{period}D")
+        logger.info(f"获取到 {len(ranking_data) if ranking_data else 0} 条基金排名数据")
+
+        if not ranking_data or len(ranking_data) == 0:
+            return jsonify({
+                "success": True,  # 改为返回成功但无数据，避免前端错误
+                "data": {
+                    "top_gainers": [],
+                    "total_count": 0,
+                    "top_n": top_n,
+                    "period": period
+                },
+                "message": "暂无基金排名数据"
+            })
+
+        top_gainers = ranking_data[:top_n]
+
+        return jsonify({
+            "success": True,
+            "data": {
+                "top_gainers": top_gainers,  # 涨幅前N个
+                "total_count": len(ranking_data),
+                "top_n": top_n,
+                "period": period
+            },
+            "message": f"获取基金涨跌幅排行成功，共 {len(ranking_data)} 个基金数据"
+        })
+    except Exception as e:
+        logger.error(f"获取基金排名数据失败: {str(e)}", exc_info=True)
+        return jsonify({
+            "success": False,
+            "message": f"获取基金排名数据失败: {str(e)}"
+        }), 500
+
+
+@app.route('/api/fund/chart_data', methods=['POST'])
+def get_fund_chart_data_api():
+    """获取基金图表数据（用于ECharts展示）"""
+    try:
+        # 获取请求参数
+        data = request.json
+        symbols = data.get('symbols', [])
+        period = data.get('period', '12M')
+        use_growth_rate = data.get('use_growth_rate', True)  # 是否使用增长率对比
+
+        # 验证参数
+        if not symbols or len(symbols) == 0:
+            return jsonify({
+                "success": False,
+                "message": "请至少选择一个基金"
+            }), 400
+
+        if len(symbols) > 10:
+            return jsonify({
+                "success": False,
+                "message": "最多只能选择10个基金进行对比"
+            }), 400
+
+        logger.info(f"请求基金图表数据，基金: {symbols}, 周期: {period}, 使用增长率: {use_growth_rate}")
+
+        # 使用fund_data_fetcher中的函数准备图表数据
+        from fund_data_fetcher import get_fund_chart_data
+        chart_data = get_fund_chart_data(symbols, period, use_growth_rate)
+
+        if chart_data and chart_data.get("series"):
+            return jsonify({
+                "success": True,
+                "data": chart_data,
+                "message": f"成功获取 {len(chart_data['series'])} 个基金的图表数据"
+            })
+        else:
+            return jsonify({
+                "success": False,
+                "message": "构建基金图表数据失败"
+            }), 500
+
+    except Exception as e:
+        logger.error(f"获取基金图表数据失败: {str(e)}", exc_info=True)
+        return jsonify({
+            "success": False,
+            "message": f"获取基金图表数据失败: {str(e)}"
         }), 500
     
 
@@ -938,6 +895,15 @@ def get_settings():
     from config_manager import config_manager
     settings = config_manager.get_settings()
     return jsonify(settings)
+
+@app.route('/api/industry_page_enabled', methods=['GET'])
+def get_industry_page_enabled():
+    """获取行业页面启用状态"""
+    from config_manager import get_industry_page_enabled
+    industry_enabled = get_industry_page_enabled()
+    return jsonify({
+        "industry_page_enabled": industry_enabled
+    })
 
 @app.route('/api/settings', methods=['POST'])
 def update_settings():
@@ -990,24 +956,73 @@ def update_stock_notification_enabled(code):
     """更新单个股票的消息发送开关状态"""
     data = request.json
     notification_enabled = data.get('notification_enabled', True)
-    
+
     # 更新到配置管理器
     from config_manager import set_stock_notification_enabled as set_stock_notif_enabled
     set_stock_notif_enabled(code, notification_enabled)
-  
+
     return jsonify({"success": True, "message": f"股票 {code} 消息发送开关已{'开启' if notification_enabled else '关闭'}"})
+
+
+# AI分析任务管理
+@app.route('/api/trend_analysis/<code>', methods=['GET'])
+def get_trend_analysis(code):
+    """获取股票趋势交易分析"""
+    try:
+        
+        name = request.args.get('name', '')
+
+        analyzer = TrendTradingAnalyzer()
+        result = analyzer.analyze_stock_trend(code, name)
+
+        return jsonify(result)
+
+    except Exception as e:
+        logger.error(f"趋势交易分析股票 {code} 失败: {str(e)}")
+        return jsonify({
+            "success": False,
+            "message": f"趋势交易分析失败: {str(e)}"
+        }), 500
+
 
 @app.route('/api/global_notification_enabled', methods=['PUT'])
 def update_global_notification_enabled():
     """更新全局消息发送开关状态"""
     data = request.json
     global_enabled = data.get('global_notification_enabled', True)
-    
+
     # 更新到配置管理器
     from config_manager import set_global_notification_enabled as set_global_notif_enabled
     set_global_notif_enabled(global_enabled)
-    
+
     return jsonify({"success": True, "message": f"全局消息发送开关已{'开启' if global_enabled else '关闭'}"})
+
+
+@app.route('/api/stocks/<code>/kline', methods=['GET'])
+def get_stock_kline_data(code):
+    """
+    获取股票 K 线数据（用于 ECharts 图表展示）
+    包含：OHLCV 数据、均线（MA5/20/60/120）、买卖信号、密集成交区
+    """
+    try:
+        from trend_trading_analyzer import TrendTradingAnalyzer
+
+        # 获取参数
+        period = request.args.get('period', '365')  # 默认最近 365 天
+        period = int(period)
+
+        # 使用趋势分析器获取 K 线图表数据
+        analyzer = TrendTradingAnalyzer()
+        result = analyzer.get_kline_chart_data(code, '', period)
+
+        return jsonify(result)
+
+    except Exception as e:
+        logger.error(f"获取股票 {code} K 线数据失败：{str(e)}", exc_info=True)
+        return jsonify({
+            "success": False,
+            "message": f"获取 K 线数据失败：{str(e)}"
+        }), 500
 
 if __name__ == '__main__':
     # 启动预加载（在新线程中执行，避免阻塞主服务启动）

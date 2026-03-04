@@ -17,13 +17,14 @@
         <nav class="nav-menu">
             <button class="nav-btn active" data-page="stock-monitor">股票监控</button>
             <button class="nav-btn" data-page="analyst-view">分析师数据</button>
-            <button class="nav-btn" data-page="industry-index">行业板块</button>
-            <button class="nav-btn" data-page="index-monitor">指数监控</button>
+            <button class="nav-btn" data-page="industry-index">行业板块统计</button>
+            <button class="nav-btn" data-page="index-monitor">指数数据统计</button>
+            <button class="nav-btn" data-page="fund-monitor">基金数据统计</button>
         </nav>
         
         <!-- 股票监控页面 -->
         <div id="stock-monitor-page" class="page-content active-page">
-            
+
             <!-- 股票列表 -->
             <div class="stocks-section">
                 <h2>监控股票列表
@@ -85,54 +86,64 @@
         
         <!-- 分析师数据页面 -->
         <div id="analyst-view-page" class="page-content">
-            <h2>东方财富分析师数据</h2>
-            <div class="analyst-controls" style="display: flex; flex-direction: column; gap: 10px;">
-                <!-- 第一行：重点关注股票按钮 -->
-                <div style="display: flex; flex-wrap: wrap; gap: 10px; align-items: left;">
-                    <button id="refresh-analyst-btn">刷新分析师重点关注股票</button>
-                    <select id="analyst-period-select">
-                        <option value="2025年">2025年收益率排行</option>
-                        <option value="3个月" selected>3个月收益率排行</option>
-                        <option value="6个月">6个月收益率排行</option>
-                        <option value="12个月">12个月收益率排行</option>
-                    </select>
-                    
-                    <select id="analyst-top-stocks-select">
-                        <option value="20">显示前20只重点关注股票</option>
-                        <option value="50" selected>显示前50只重点关注股票</option>
-                        <option value="100">显示前100重点关注只股票</option>
-                        <option value="all">显示全部股票</option>
-                    </select>
+            <h2>东财分析师数据</h2>
 
-                    <select id="analyst-top-analysts-select">
-                        <option value="20" selected>显示前20名分析师最新成份股</option>
-                        <option value="50">显示前50名分析师最新成份股</option>
-                        <option value="100">显示前100名分析师最新成份股</option>
-                        <option value="all">显示全部分析师最新成份股</option>
-                    </select>
-                </div>
-                
-                <!-- 第二行：最近更新按钮 -->
-                <div class="recently-updated-controls" style="display: flex; gap: 10px; align-items: left;">
-                    <button id="refresh-recently-updated-btn">刷新分析师最近更新股票</button>
-                    <input type="number" id="date-threshold-input" value="30" min="1" max="120" style="width: 60px; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
-                    <span style="margin-left: 5px;">天</span>
+            <!-- 分析师重点关注股票控制面板 -->
+            <div class="analyst-controls-top" style="display: flex; gap: 15px; align-items: center; flex-wrap: wrap; margin-bottom: 20px; padding: 15px; background-color: #f8f9fa; border-radius: 5px;">
+                <button id="refresh-analyst-btn">刷新分析师重点关注股票</button>
+                <select id="analyst-period-select">
+                    <option value="2025年">2025年收益率排行</option>
+                    <option value="3个月" selected>3个月收益率排行</option>
+                    <option value="6个月">6个月收益率排行</option>
+                    <option value="12个月">12个月收益率排行</option>
+                </select>
+                <select id="analyst-top-stocks-select">
+                    <option value="20">显示前20只重点关注股票</option>
+                    <option value="50" selected>显示前50只重点关注股票</option>
+                    <option value="100">显示前100重点关注只股票</option>
+                    <option value="all">显示全部股票</option>
+                </select>
+                <select id="analyst-top-analysts-select">
+                    <option value="20">基于前20名分析师跟踪数据</option>
+                    <option value="50" selected>基于前50名分析师跟踪数据</option>
+                    <option value="100">基于前100名分析师跟踪数据</option>
+                    <option value="all">基于全部分析师跟踪数据</option>
+                </select>
+            </div>
+
+            <!-- 分析师重点关注股票数据区域 -->
+            <div class="analyst-split-layout">
+                <div class="analyst-data-panel">
+                    <h3>分析师重点关注股票</h3>
+                    <div id="analyst-focus-stocks-container">
+                        <p>点击上方按钮加载分析师重点关注股票数据...</p>
+                    </div>
                 </div>
             </div>
-            
-            <div id="analyst-data-container">
-                <p>点击上方按钮加载分析师数据...</p>
+
+            <!-- 分析师最新跟踪股票控制面板 -->
+            <div class="analyst-controls-bottom" style="display: flex; gap: 15px; align-items: center; flex-wrap: wrap; margin-top: 20px; margin-bottom: 20px; padding: 15px; background-color: #f0f8f0; border-radius: 5px;">
+                <button id="refresh-recently-updated-btn">刷新分析师最新跟踪股票</button>
+                <input type="number" id="date-threshold-input" value="30" min="1" max="120" style="width: 60px; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                <span>天内更新的股票</span>
+            </div>
+
+            <!-- 分析师最新跟踪股票数据区域 -->
+            <div class="analyst-split-layout">
+                <div class="analyst-data-panel">
+                    <h3>分析师最新跟踪股票</h3>
+                    <div id="analyst-latest-tracking-container">
+                        <p>点击上方按钮加载分析师最新跟踪股票数据...</p>
+                    </div>
+                </div>
             </div>
         </div>
         
         <!-- 行业板块页面 -->
         <div id="industry-index-page" class="page-content">
-            <h2>行业板块监控</h2>
+            <h2>行业板块统计</h2>
             <div class="industry-controls">
                 <button id="refresh-industry-btn">刷新行业数据</button>
-                <select id="industry-sector-select">
-                    <option value="all">全部行业</option>
-                </select>
                 <select id="industry-period-select">
                     <option value="1">最近1天</option>
                     <option value="30" selected>最近30天</option>
@@ -140,7 +151,13 @@
                     <option value="120">最近120天</option>
                     <option value="365">最近一年</option>
                 </select>
-                <input type="number" id="top-n-input" value="20" min="5" max="50" style="width: 60px; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                <select id="top-n-input">
+                    <option value="5">显示前5个</option>
+                    <option value="10">显示前10个</option>
+                    <option value="20" selected>显示前20个</option>
+                    <option value="30">显示前30个</option>
+                    <option value="50">显示前50个</option>
+                </select>
                 <label>
                     <input type="checkbox" id="show-loser-industries"> 显示跌幅行业
                 </label>
@@ -190,59 +207,40 @@
             </div>
         </div> <!-- 行业板块页面结束 -->
         
-        <!-- 指数监控页面 -->
+        <!-- 指数统计页面 -->
         <div id="index-monitor-page" class="page-content">
-            <h2>指数监控</h2>
-            <!-- 指数概览卡片 -->
-            <div class="card">
-                <h3>指数概览</h3>
-                <div class="overview-stats">
-                    <div class="stat-item">
-                        <span class="stat-label">总指数数</span>
-                        <span class="stat-value" id="total-indices">0</span>
-                    </div>
-                    <div class="stat-item">
-                        <span class="stat-label">上涨指数</span>
-                        <span class="stat-value positive" id="rising-indices">0</span>
-                    </div>
-                    <div class="stat-item">
-                        <span class="stat-label">下跌指数</span>
-                        <span class="stat-value negative" id="falling-indices">0</span>
-                    </div>
-                </div>
+            <h2>指数数据统计</h2>
+
+            <!-- 指数排名控制 -->
+            <div class="index-controls-top" style="display: flex; gap: 15px; align-items: center; flex-wrap: wrap; margin-bottom: 20px; padding: 15px; background-color: #f8f9fa; border-radius: 5px;">
+                <button id="refresh-index-ranking" style="padding: 8px 12px; border: 1px solid #ddd; border-radius: 4px; background: white; cursor: pointer;">刷新指数排名</button>
+                <select id="index-period-select" style="padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                    <option value="1">最近1天</option>
+                    <option value="5">最近5天</option>
+                    <option value="10">最近10天</option>
+                    <option value="20">最近20天</option>
+                    <option value="30" selected>最近30天</option>
+                    <option value="60">最近60天</option>
+                    <option value="90">最近90天</option>
+                    <option value="240">最近240天</option>
+                    <option value="360">最近360天</option>
+                </select>
+                <select id="top-n-index" style="padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                    <option value="10">显示前10个</option>
+                    <option value="28" selected>显示前28个</option>
+                    <option value="40">显示前40个</option>
+                    <option value="50">显示前50个</option>
+                    <option value="100">显示前100个</option>
+                    <option value="all">显示所有指数</option>
+                </select>
             </div>
 
-            <!-- 指数排名 -->
-            <div class="card">
-                <h3>指数涨跌幅排名</h3>
-                <div class="index-controls">
-                    <button id="refresh-index-ranking" class="btn btn-primary">刷新排名</button>
-                    <select id="index-period-select" class="form-select">
-                        <option value="1">最近1天</option>
-                        <option value="5">最近5天</option>
-                        <option value="30" selected>最近30天</option>
-                        <option value="60">最近60天</option>
-                        <option value="90">最近90天</option>
-                        <option value="240">最近240天</option>
-                        <option value="360">最近360天</option>
-                    </select>
-                    <select id="top-n-index" class="form-select">
-                        <option value="10">显示前10个</option>
-                        <option value="20" selected>显示前20个</option>
-                        <option value="30">显示前30个</option>
-                        <option value="50">显示前50个</option>
-                    </select>
-                    <label>
-                        <input type="checkbox" id="use-sina-ranking"> 使用新浪排名
-                    </label>
-                </div>
-                <div id="index-ranking-container">
-                    <p>点击上方按钮加载指数数据...</p>
-                </div>
+            <div id="index-ranking-container">
+                <p>点击上方按钮加载指数数据...</p>
             </div>
 
             <!-- 指数对比图表 -->
-            <h2>指数走势对比图</h2>
+            <h2>指数走势对比图（最近30天前28名）</h2>
             
             <!-- 指数选择区域 -->
             <div class="index-chart-controls">
@@ -281,6 +279,79 @@
                 </div>
             </div>
         </div>
+
+        <!-- 基金统计页面 -->
+        <div id="fund-monitor-page" class="page-content fund-full-width-panel">
+            <h2>基金数据统计</h2>
+
+            <!-- 基金排名控制 -->
+            <div class="fund-controls">
+                <button id="refresh-fund-ranking">刷新基金排名</button>
+                <select id="fund-period-select">
+                    <option value="1">最近1天</option>
+                    <option value="5">最近5天</option>
+                    <option value="10">最近10天</option>
+                    <option value="20">最近20天</option>
+                    <option value="30" selected>最近30天</option>
+                    <option value="60">最近60天</option>
+                    <option value="90">最近90天</option>
+                    <option value="180">最近180天</option>
+                    <option value="365">最近365天</option>
+                </select>
+                <select id="top-n-fund">
+                    <option value="10">显示前10个</option>
+                    <option value="28" selected>显示前28个</option>
+                    <option value="40">显示前40个</option>
+                    <option value="50">显示前50个</option>
+                    <option value="100">显示前100个</option>
+                    <option value="all">显示所有基金</option>
+                </select>
+            </div>
+
+            <div id="fund-ranking-container">
+                <p>点击上方按钮加载基金数据...</p>
+            </div>
+
+            <!-- 基金对比图表 -->
+            <h2>基金走势对比图（最近30天前28名）</h2>
+
+            <!-- 基金选择区域 -->
+            <div class="fund-chart-controls">
+                <div class="control-section">
+                    <h3>选择基金（最多10个）：</h3>
+                    <div id="fund-checkboxes" class="industry-checkboxes-grid">
+                        <!-- 动态加载基金复选框 -->
+                        <p style="color: #999;">加载中...</p>
+                    </div>
+                </div>
+
+                <!-- 时间周期选择 -->
+                <div class="control-section">
+                    <h3>时间周期：</h3>
+                    <div class="period-buttons">
+                        <button class="period-btn" data-period="30">近1月</button>
+                        <button class="period-btn" data-period="90">近3月</button>
+                        <button class="period-btn" data-period="180">近半年</button>
+                        <button class="period-btn active" data-period="365">近1年</button>
+                        <button class="period-btn" data-period="1825">近5年</button>
+                    </div>
+                </div>
+
+                <!-- 操作按钮 -->
+                <div class="control-section">
+                    <button id="render-fund-chart-btn" class="primary-btn">生成图表</button>
+                    <button id="clear-fund-selection-btn" class="secondary-btn">清除选择</button>
+                    <span id="fund-selected-count" style="margin-left: 15px; color: #666;">已选择: 0 个基金</span>
+                </div>
+            </div>
+
+            <!-- 图表容器 -->
+            <div id="fund-chart-container" style="width: 100%; height: 600px; margin-top: 20px; border: 1px solid #ddd; border-radius: 4px;">
+                <div style="display: flex; align-items: center; justify-content: center; height: 100%; color: #99;">
+                    请选择基金并点击"生成图表"按钮
+                </div>
+            </div>
+        </div>
     </div> <!-- container 结束 -->
 
     <!-- 外部资源链接区域 -->
@@ -289,11 +360,11 @@
         <div style="display: flex; flex-wrap: wrap; gap: 20px;">
             <div style="flex: 1; min-width: 200px;">
                 <h3 style="margin-top: 0; color: #555;">微信消息推送服务</h3>
-                <p><a href="https://message.yourdomain.cn/" target="_blank" style="color: #1890ff; text-decoration: none;">访问微信消息推送服务</a></p>
+                <p><a href="https://message.jgyang.cn/" target="_blank" style="color: #1890ff; text-decoration: none;">访问微信消息推送服务</a></p>
             </div>
             <div style="flex: 1; min-width: 200px;">
                 <h3 style="margin-top: 0; color: #555;">历史备份数据</h3>
-                <p><a href="https://blog.yourdomain.cn/stocks/" target="_blank" style="color: #1890ff; text-decoration: none;">访问历史备份数据</a></p>
+                <p><a href="https://blog.jgyang.cn/stocks/" target="_blank" style="color: #1890ff; text-decoration: none;">访问历史备份数据</a></p>
             </div>
 
             <div style="flex: 1; min-width: 200px;">
@@ -304,142 +375,87 @@
                 <h3 style="margin-top: 0; color: #555;">akshare开源项目</h3>
                 <p><a href="https://github.com/akfamily/akshare" target="_blank" style="color: #1890ff; text-decoration: none;">访问akshare开源项目</a></p>
             </div>
-            <div style="flex: 1; min-width: 200px;">
-                <h3 style="margin-top: 0; color: #555;">东方财富分析师数据</h3>
-                <p><a href="https://data.eastmoney.com/invest/invest/list.html" target="_blank" style="color: #1890ff; text-decoration: none;">访问分析师数据</a></p>
-            </div>
         </div>
     </div>
 
     <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
-    <script src="/static/js/modules/stock_view.js"></script>
-    <!-- Tabulator功能模块，用于表格排序等功能 -->
     <script src="https://unpkg.com/tabulator-tables@5.6.1/dist/js/tabulator.min.js"></script>
     <link href="https://unpkg.com/tabulator-tables@5.6.1/dist/css/tabulator.min.css" rel="stylesheet">
-    <script src="/static/js/tabulator_features.js"></script>
-    <!-- ECharts图表库 -->
     <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
-    <script src="/static/js/modules/index_view.js"></script>
-    <script src="/static/js/modules/industry_view.js"></script>
+	<script src="/static/js/modules/stock_view.js"></script>
     <script src="/static/js/modules/analyst_view.js"></script>
+    <script src="/static/js/modules/industry_view.js"></script>
+    <script src="/static/js/modules/index_view.js"></script>
+    <script src="/static/js/modules/fund_view.js"></script>
     
     <!-- 页面按钮事件绑定 -->
     <script>
         // 页面加载完成后绑定按钮事件
         document.addEventListener('DOMContentLoaded', function() {
-            // 绑定分析师数据刷新按钮事件
-            const refreshAnalystBtn = document.getElementById('refresh-analyst-btn');
-            if (refreshAnalystBtn) {
-                refreshAnalystBtn.addEventListener('click', function() {
-                    console.log('刷新分析师数据按钮被点击');
-                    if (typeof loadAnalystData === 'function') {
-                        loadAnalystData();
-                    } else {
-                        console.error('loadAnalystData函数未定义');
+            // 检查行业页面是否启用
+            const checkIndustryPageEnabled = function() {
+                // 通过AJAX获取配置
+                fetch('/api/industry_page_enabled')
+                .then(response => response.json())
+                .then(data => {
+                    const industryEnabled = data.industry_page_enabled !== undefined ? data.industry_page_enabled : true;
+                    const industryPageElement = document.getElementById('industry-index-page');
+                    const industryNavButton = document.querySelector('[data-page="industry-index"]');
+                    
+                    if (!industryEnabled) {
+                        // 隐藏行业板块页面
+                        if (industryPageElement) {
+                            industryPageElement.style.display = 'none';
+                        }
+                        // 隐藏行业板块导航按钮
+                        if (industryNavButton) {
+                            industryNavButton.style.display = 'none';
+                        }
+                        // 如果当前显示的是行业页面，则切换到第一个页面
+                        const activePage = document.querySelector('.page-content.active-page');
+                        if (activePage && activePage.id === 'industry-index-page') {
+                            const firstPage = document.querySelector('.page-content');
+                            if (firstPage) {
+                                firstPage.classList.add('active-page');
+                                // 隐藏其他页面
+                                document.querySelectorAll('.page-content').forEach(page => {
+                                    if (page !== firstPage) {
+                                        page.classList.remove('active-page');
+                                    }
+                                });
+                                // 更新导航按钮状态
+                                document.querySelectorAll('.nav-btn').forEach(btn => {
+                                    btn.classList.remove('active');
+                                });
+                                document.querySelector('.nav-btn[data-page="stock-monitor"]').classList.add('active');
+                            }
+                        }
+                    }
+                })
+                .catch(error => {
+                    console.error('获取设置失败:', error);
+                    // 如果获取失败，默认启用行业页面
+                    const industryPageElement = document.getElementById('industry-index-page');
+                    const industryNavButton = document.querySelector('[data-page="industry-index"]');
+                    if (industryPageElement) {
+                        industryPageElement.style.display = 'block';
+                    }
+                    if (industryNavButton) {
+                        industryNavButton.style.display = 'inline-block';
                     }
                 });
-            }
+            };
             
-            // 绑定行业数据刷新按钮事件
-            const refreshIndustryBtn = document.getElementById('refresh-industry-btn');
-            if (refreshIndustryBtn) {
-                refreshIndustryBtn.addEventListener('click', function() {
-                    console.log('刷新行业数据按钮被点击');
-                    if (typeof loadIndustryData === 'function') {
-                        loadIndustryData();
-                    } else {
-                        console.error('loadIndustryData函数未定义');
-                    }
-                });
-            }
+            // 页面加载时检查行业页面启用状态
+            checkIndustryPageEnabled();
             
-            // 绑定最近更新股票数据刷新按钮事件
-            const refreshRecentlyUpdatedBtn = document.getElementById('refresh-recently-updated-btn');
-            if (refreshRecentlyUpdatedBtn) {
-                refreshRecentlyUpdatedBtn.addEventListener('click', function() {
-                    console.log('刷新最近更新股票数据按钮被点击');
-                    if (typeof loadRecentlyUpdatedStocks === 'function') {
-                        loadRecentlyUpdatedStocks();
-                    } else {
-                        console.error('loadRecentlyUpdatedStocks函数未定义');
-                    }
-                });
-            }
+            // 分析师页面事件绑定已移至stock_view.js的按需初始化中
             
-            // 绑定指数页面初始化
-            const refreshIndexRankingBtn = document.getElementById('refresh-index-ranking');
-            if (refreshIndexRankingBtn) {
-                refreshIndexRankingBtn.addEventListener('click', function() {
-                    console.log('刷新指数排名按钮被点击');
-                    if (typeof loadIndexRanking === 'function') {
-                        loadIndexRanking();
-                    } else {
-                        console.error('loadIndexRanking函数未定义');
-                    }
-                });
-            }
+            // 行业页面事件绑定已移至stock_view.js的按需初始化中
             
-            // 绑定指数周期选择变化事件
-            const indexPeriodSelect = document.getElementById('index-period-select');
-            if (indexPeriodSelect) {
-                indexPeriodSelect.addEventListener('change', function() {
-                    console.log('指数周期选择改变');
-                    if (typeof loadIndexRanking === 'function') {
-                        loadIndexRanking();
-                    } else {
-                        console.error('loadIndexRanking函数未定义');
-                    }
-                });
-            }
-            
-            // 绑定指数显示前N个选择变化事件
-            const topNSelect = document.getElementById('top-n-index');
-            if (topNSelect) {
-                topNSelect.addEventListener('change', function() {
-                    console.log('指数显示前N个选择改变');
-                    if (typeof loadIndexRanking === 'function') {
-                        loadIndexRanking();
-                    } else {
-                        console.error('loadIndexRanking函数未定义');
-                    }
-                });
-            }
-            
-            // 绑定指数跌幅显示复选框变化事件
-            const showLoserIndicesCheckbox = document.getElementById('show-loser-indices');
-            if (showLoserIndicesCheckbox) {
-                showLoserIndicesCheckbox.addEventListener('change', function() {
-                    console.log('指数跌幅显示复选框改变');
-                    if (typeof loadIndexRanking === 'function') {
-                        loadIndexRanking();
-                    } else {
-                        console.error('loadIndexRanking函数未定义');
-                    }
-                });
-            }
-            
-            // 页面加载时自动初始化指数页面
-            console.log('页面加载完成，初始化指数模块...');
-            if (typeof loadIndexOverview === 'function') {
-                loadIndexOverview();
-                console.log('指数概览数据加载完成');
-            } else {
-                console.error('loadIndexOverview函数未定义');
-            }
-            
-            if (typeof loadIndexRanking === 'function') {
-                loadIndexRanking();
-                console.log('指数排名数据加载完成');
-            } else {
-                console.error('loadIndexRanking函数未定义');
-            }
-            
-            if (typeof initializeIndexChartPage === 'function') {
-                initializeIndexChartPage();
-                console.log('指数图表页面初始化完成');
-            } else {
-                console.error('initializeIndexChartPage函数未定义');
-            }
+            // 指数页面事件绑定已移至stock_view.js的按需初始化中
+
+            // 基金页面事件绑定已移至stock_view.js的按需初始化中
         });
     </script>
 </body>

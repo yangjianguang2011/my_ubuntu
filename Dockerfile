@@ -3,15 +3,22 @@ FROM ubuntu:22.04
 
 # 1. 设置时区和镜像源（合并操作）
 ENV TZ=Asia/Shanghai
- RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone && \
+
+RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone && \
      cp /etc/apt/sources.list /etc/apt/sources.list.bak && \
      echo "deb http://mirrors.ustc.edu.cn/ubuntu/ jammy main restricted universe multiverse" > /etc/apt/sources.list && \
      echo "deb http://mirrors.ustc.edu.cn/ubuntu/ jammy-updates main restricted universe multiverse" >> /etc/apt/sources.list && \
      echo "deb http://mirrors.ustc.edu.cn/ubuntu/ jammy-backports main restricted universe multiverse" >> /etc/apt/sources.list && \
      echo "deb http://mirrors.ustc.edu.cn/ubuntu/ jammy-security main restricted universe multiverse" >> /etc/apt/sources.list 
+
 #RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone && \
 #    sed -i 's/archive.ubuntu.com/mirrors.ustc.edu.cn/g' /etc/apt/sources.list && \
 #    sed -i 's/security.ubuntu.com/mirrors.ustc.edu.cn/g' /etc/apt/sources.list
+
+#RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone && \
+#    sed -i 's/archive.ubuntu.com/mirrors.aliyun.com/g' /etc/apt/sources.list && \
+#    sed -i 's/security.ubuntu.com/mirrors.aliyun.com/g' /etc/apt/sources.list
+
 
 # 2. 一次性安装所有系统依赖（减少层数）
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -79,7 +86,7 @@ RUN mkdir -p /var/run/sshd && \
 # 8. 安装项目依赖（分开处理，便于缓存）
 # Stock Monitor
 COPY ./stock_monitor/requirements.txt /tmp/stock_requirements.txt
-RUN pip3 install --no-cache-dir -r /tmp/stock_requirements.txt && rm /tmp/stock_requirements.txt
+RUN pip3 install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple -r /tmp/stock_requirements.txt && rm /tmp/stock_requirements.txt
 
 # NEWS
 COPY ./news/requirements.txt /tmp/news_requirements.txt
@@ -110,10 +117,11 @@ RUN chmod +x \
     /root/stock_monitor/check_stock_monitor.sh
 
 # 11. 配置Cron作业（使用单独文件便于管理）
-RUN echo "0 1 * * * root cd /root/stock_monitor && /bin/bash /root/stock_monitor/check_stock_monitor.sh >> /var/log/cron.log 2>&1" >> /etc/crontab && \
-    echo "0 23 * * * root cd /root/iptv && /usr/bin/python3 download_m3u.py >> /var/log/cron.log 2>&1" >> /etc/crontab && \
-    echo "0 */8 * * * root cd /root/news/ && /bin/bash /root/news/run.sh >> /var/log/cron.log 2>&1" >> /etc/crontab && \
-    echo "0 23 * * * root cd /root/stock_monitor && /bin/bash /root/stock_monitor/run_eastmoney_analyst.sh >> /var/log/cron.log 2>&1" >> /etc/crontab
+RUN echo "0 23 * * * root cd /root/stock_monitor && /bin/bash /root/stock_monitor/check_stock_monitor.sh >> /var/log/cron.log 2>&1" >> /etc/crontab && \
+    echo "1 23 * * * root cd /root/iptv && /usr/bin/python3 download_m3u.py >> /var/log/cron.log 2>&1" >> /etc/crontab && \
+    echo "5 23 * * * root cd /root/stock_monitor && /bin/bash /root/stock_monitor/run_xueqiu_scraper.sh >> /var/log/cron.log 2>&1" >> /etc/crontab && \
+    echo "35 23 * * * root cd /root/stock_monitor && /bin/bash /root/stock_monitor/run_eastmoney_analyst.sh >> /var/log/cron.log 2>&1" >> /etc/crontab && \
+    echo "0 */8 * * * root cd /root/news/ && /bin/bash /root/news/run.sh >> /var/log/cron.log 2>&1" >> /etc/crontab 
 
 
 # 14. 暴露端口

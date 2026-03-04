@@ -2,7 +2,7 @@ import requests
 from datetime import datetime
 from logger_config import logger, gconfig
 
-SERVER = gconfig.get('message_server', 'https://message.yourdomain.cn:5555')
+SERVER = gconfig.get('message_server', 'https://message.jgyang.cn:5555')
 USERNAME = gconfig.get('message_username', 'root')
 TOKEN = gconfig.get('message_token', '12123121')
 CHANNEL = gconfig.get('message_channel', 'wechat')  

@@ -16,99 +16,105 @@ from datetime import datetime, timedelta
 
 def preload_cache_data():
     """预加载常用数据到缓存"""
-    from analyst_data_fetcher import get_analyst_rank_data, _fetch_analyst_stocks
-    from industry_data_fetcher import get_industry_names, get_single_industry_history
-    from index_data_fetcher import get_index_history
+    try:
+        from analyst_data_fetcher import get_analyst_rank_data, _fetch_analyst_stocks
+        from industry_data_fetcher import get_industry_names, get_single_industry_history
+        from index_data_fetcher import get_index_daily_data, SINA_ALL_INDEX
+        from fund_data_fetcher import get_fund_daily_data, SELECTED_FUND_LIST
+        from config_manager import get_industry_page_enabled
+    except ImportError as e:
+        logger.error(f"导入数据获取模块失败: {e}")
+        return
+
     sleep_duration = gconfig.get('industry_cache_timeout', 24 * 60 * 60) + 60  # 多等一分钟再循环
     first_run = True
-
 
     while True:
         time.sleep(5)  # 等待一段时间，确保系统初始化完成
         logger.info("开始预加载缓存数据...")
 
-        # 获取所有分析师和行业板块的列表，用于计算平均延迟时间
-        all_analysts = get_analyst_rank_data()  # 获取所有分析师列表
-        all_industries = get_industry_names()   # 获取所有行业列表
-        all_indexs = SELECTED_MAIN_INDEX = [
-            {"symbol": "sh000510", "name": "中证A500", "interface": "sinae"},
-            {"symbol": "zs000813", "name": "细分化工", "interface": "eastmoney"},
-            {"symbol": "sz399971", "name": "中证传媒", "interface": "sina"}, 
-            {"symbol": "sz399804", "name": "中证体育", "interface": "sina"}, 
-            {"symbol": "sz399935", "name": "中证信息", "interface": "sina"}, 
-            {"symbol": "sz399967", "name": "中证军工", "interface": "sina"}, 
-            {"symbol": "sz399989", "name": "中证医疗", "interface": "sina"}, 
-            {"symbol": "sz399933", "name": "中证医药", "interface": "sina"}, 
-            {"symbol": "sz399808", "name": "中证新能", "interface": "sina"}, 
-            {"symbol": "sz399932", "name": "中证消费", "interface": "sina"}, 
-            {"symbol": "sz399998", "name": "中证煤炭", "interface": "sina"}, 
-            {"symbol": "sh000827", "name": "中证环保", "interface": "sina"}, 
-            {"symbol": "sz399997", "name": "中证白酒", "interface": "sina"}, 
-            {"symbol": "sz399928", "name": "中证能源", "interface": "sina"}, 
-            {"symbol": "sh000934", "name": "中证金融", "interface": "sina"}, 
-            {"symbol": "sz399986", "name": "中证银行", "interface": "sina"}, 
-            {"symbol": "sz399283", "name": "机器人50", "interface": "sina"},
-            {"symbol": "sz399363", "name": "国证算力", "interface": "sina"}, 
-            {"symbol": "sz399365", "name": "国证粮食", "interface": "sina"}, 
-            {"symbol": "sz399389", "name": "国证通信", "interface": "sina"}, 
-            {"symbol": "sz399395", "name": "国证有色", "interface": "sina"}, 
-            {"symbol": "sz399440", "name": "国证钢铁", "interface": "sina"}, 
-            {"symbol": "sz399353", "name": "国证物流", "interface": "sina"}, 
-            {"symbol": "sz399397", "name": "国证文化", "interface": "sina"}, 
-            {"symbol": "sz399435", "name": "国证农牧", "interface": "sina"}, 
-            {"symbol": "sz980035", "name": "化肥农药", "interface": "sina"}
-        ]        
-        avg_delay_per_call = sleep_duration / (len(all_analysts) + len(all_industries) + len(all_indexs) + 1)
-        
-        current_date = datetime.now()
-        end_date = current_date.strftime('%Y%m%d')
-        start_date = (current_date - timedelta(days=int(30))).strftime('%Y%m%d')
-
-        if first_run:
-            avg_delay_per_call = 1
-            first_run = False
-
-        logger.info(f"分析师个数 {len(all_analysts)}, 行业个数 {len(all_industries)}, 指数个数 {len(all_indexs)} "
-                   f"缓存总时长 {sleep_duration}, 平均每次调用延迟: {avg_delay_per_call:.2f}秒")
-
         try:
-            for idx, analyst in enumerate(all_analysts):
-                analyst_id = analyst.get('分析师ID', '')
-                analyst_name = analyst.get('分析师名称', '')
-                logger.info(f"预加载分析师详情 {analyst_name}({analyst_id}) ...")
+            # 获取所有分析师和行业板块的列表，用于计算平均延迟时间
+            logger.info("获取分析师数据列表...")
+            all_analysts = get_analyst_rank_data()  # 获取所有分析师列表
+            logger.info("获取行业数据列表...")
+            all_industries = get_industry_names() if get_industry_page_enabled() else []   # 获取所有行业列表
+            all_indexs = SINA_ALL_INDEX
+            all_funds = SELECTED_FUND_LIST
+
+            total_items = len(all_analysts) + len(all_industries) + len(all_indexs) + len(all_funds)
+            avg_delay_per_call = max(0.1, sleep_duration / total_items if total_items > 0 else 0.1)
+
+            current_date = datetime.now()
+            end_date = current_date.strftime('%Y%m%d')
+            start_date = (current_date - timedelta(days=int(30))).strftime('%Y%m%d')
+
+            if first_run:
+                avg_delay_per_call = 5  # 第一次运行时使用较短的延迟
+                first_run = False
+
+            logger.info(f"分析师个数 {len(all_analysts)}, 行业个数 {len(all_industries)}, 指数个数 {len(all_indexs)}, 基金个数 {len(all_funds)}, "
+                       f"缓存总时长 {sleep_duration}, 平均每次调用延迟: {avg_delay_per_call:.2f}秒")
+
+            # 预加载基金数据
+            logger.info(f"开始预加载 {len(all_funds)} 个基金数据...")
+            for idx, fund in enumerate(all_funds):
+                fund_code = str(fund.get('基金代码', '')).zfill(6)  # 确保基金代码为6位
+                fund_name = fund.get('基金简称', '')
+                logger.info(f"[{idx+1}/{len(all_funds)}] 预加载基金历史数据 {fund_name}({fund_code}) ...")
                 try:
-                    analyst_stocks, _, _ = _fetch_analyst_stocks(analyst_id, analyst_name, "最新跟踪成分股")
+                    get_fund_daily_data(fund_code, apply_delay=False)
+                    logger.debug(f"基金 {fund_name}({fund_code}) 数据预加载成功")
                 except Exception as e:
-                    logger.error(f"预加载分析师 {analyst_name}({analyst_id}) 数据失败: {e}")
-                    
+                    logger.error(f"预加载基金 {fund_name}({fund_code}) 数据失败: {e}", exc_info=True)
                 time.sleep(avg_delay_per_call)
 
-            for idx, industry in enumerate(all_industries):
-                industry_name = industry.get('板块名称', '')
-                logger.info(f"预加载行业历史数据 {industry_name} ...")
-                try:
-                    get_single_industry_history(industry_name, start_date, end_date)
-                except Exception as e:
-                    logger.error(f"预加载行业 {industry_name} 数据失败: {e}")
-
-                time.sleep(avg_delay_per_call)
-
+            # 预加载指数数据
+            logger.info(f"开始预加载 {len(all_indexs)} 个指数数据...")
             for idx, index in enumerate(all_indexs):
                 symbol = index.get('symbol', '')
                 iname = index.get('name')
-                logger.info(f"预加载指数历史数据 {iname} ...")
+                logger.info(f"[{idx+1}/{len(all_indexs)}] 预加载指数历史数据 {iname} ...")
                 try:
-                    get_index_history(symbol=symbol)
+                    get_index_daily_data(symbol=symbol)
+                    logger.debug(f"指数 {iname} 数据预加载成功")
                 except Exception as e:
-                    logger.error(f"预加载行业 {industry_name} 数据失败: {e}")
+                    logger.error(f"预加载指数 {iname} 数据失败: {e}", exc_info=True)
                 time.sleep(avg_delay_per_call)
+
+            # 预加载分析师数据
+            logger.info(f"开始预加载 {len(all_analysts)} 个分析师数据...")
+            for idx, analyst in enumerate(all_analysts):
+                analyst_id = analyst.get('分析师ID', '')
+                analyst_name = analyst.get('分析师名称', '')
+                logger.info(f"[{idx+1}/{len(all_analysts)}] 预加载分析师详情 {analyst_name}({analyst_id}) ...")
+                try:
+                    analyst_stocks, _, _ = _fetch_analyst_stocks(analyst_id, analyst_name, "最新跟踪成分股")
+                    logger.debug(f"分析师 {analyst_name}({analyst_id}) 数据预加载成功")
+                except Exception as e:
+                    logger.error(f"预加载分析师 {analyst_name}({analyst_id}) 数据失败: {e}", exc_info=True)
+                time.sleep(avg_delay_per_call)
+
+            # 预加载行业数据
+            logger.info(f"开始预加载 {len(all_industries)} 个行业数据...")
+            for idx, industry in enumerate(all_industries):
+                industry_name = industry.get('板块名称', '')
+                logger.info(f"[{idx+1}/{len(all_industries)}] 跳过预加载行业历史数据 {industry_name} ...")
+                try:
+                   get_single_industry_history(industry_name, start_date, end_date)
+                   logger.debug(f"行业 {industry_name} 数据预加载成功")
+                except Exception as e:
+                   logger.error(f"预加载行业 {industry_name} 数据失败: {e}", exc_info=True)
+                time.sleep(avg_delay_per_call)
+
+            logger.info("所有缓存数据预加载完成")
+
         except Exception as e:
-            logger.error(f"预加载数据失败: {e}")
+            logger.error(f"预加载数据过程中发生严重错误: {e}", exc_info=True)
 
-        logger.info("缓存数据预加载完成")
-
-        #等待缓存过期时间再重新预加载
-        #time.sleep(sleep_duration)
+        # 等待缓存过期时间再重新预加载
+        logger.info(f"等待 {avg_delay_per_call} 秒后重新预加载...")
+        time.sleep(avg_delay_per_call)
 
 
 def start_web_server():

@@ -82,48 +82,14 @@
         flex-direction: column;
         align-items: stretch;
     }
-    
+
     .filter-group {
         width: 100%;
     }
-    
+
     .overview-card {
         min-width: 120px;
     }
-}
-
-/* 为正负值添加颜色 */
-.positive {
-    color: #28a745 !important;
-}
-
-.negative {
-    color: #dc3545 !important;
-}
-
-/* 表格样式 */
-.index-table {
-    width: 100%;
-    border-collapse: collapse;
-    margin: 20px 0;
-    font-size: 14px;
-}
-
-.index-table th,
-.index-table td {
-    padding: 12px;
-    text-align: left;
-    border-bottom: 1px solid #dee2e6;
-}
-
-.index-table th {
-    background-color: #f8f9fa;
-    font-weight: bold;
-    color: #495057;
-}
-
-.index-table tr:hover {
-    background-color: #f8f9fa;
 }
 
 /* 图表控制按钮样式 */
@@ -185,5 +151,5 @@
 .form-select:focus {
     outline: none;
     border-color: #007bff;
-    box-shadow: 0 0 0 0.2rem rgba(0,123,255,.25);
+    box-shadow: 0 0.2rem rgba(0,123,255,.25);
 }

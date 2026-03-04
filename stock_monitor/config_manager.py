@@ -485,6 +485,12 @@ def set_stock_notification_enabled(stock_code, enabled):
     config_manager.set_stock_notification_enabled(stock_code, enabled)
 
 
+def get_industry_page_enabled():
+    """获取行业页面开关状态"""
+    settings = config_manager.get_settings()
+    return settings.get('industry_page_enabled', False)
+
+
 if __name__ == "__main__":
     # 测试配置管理系统功能
     logger.info("测试配置管理系统...")

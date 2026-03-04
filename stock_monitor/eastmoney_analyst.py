@@ -83,8 +83,104 @@ def setup_driver():
     driver.implicitly_wait(10) # 设置隐式等待
     return driver
 
-def navigate_and_click_rank_period(driver, period="2025 年度排行"):
-    """导航到目标页面并点击指定时间段排行"""
+def click_industry_category(driver, category_name):
+    """点击行业类别按钮"""
+    try:
+        # 行业类别映射到页面实际的按钮文本
+        category_mapping = {
+            "农林牧渔": "农林牧渔",
+            "基础化工": "基础化工",
+            "钢铁": "钢铁",
+            "有色金属": "有色金属",
+            "电子": "电子",
+            "汽车": "汽车",
+            "家用电器": "家用电器",
+            "食品饮料": "食品饮料",
+            "纺织服饰": "纺织服饰",
+            "轻工制造": "轻工制造",
+            "医药生物": "医药生物",
+            "公用事业": "公用事业",
+            "交通运输": "交通运输",
+            "房地产": "房地产",
+            "商贸零售": "商贸零售",
+            "社会服务": "社会服务",
+            "银行": "银行",
+            "非银金融": "非银金融",
+            "建筑材料": "建筑材料",
+            "建筑装饰": "建筑装饰",
+            "电力设备": "电力设备",
+            "机械设备": "机械设备",
+            "国防军工": "国防军工",
+            "计算机": "计算机",
+            "传媒": "传媒",
+            "通信": "通信",
+            "煤炭": "煤炭",
+            "石油石化": "石油石化",
+            "环保": "环保",
+            "美容护理": "美容护理"
+        }
+        
+        if category_name not in category_mapping:
+            logger.warning(f"未知的行业类别：{category_name}")
+            return False
+        
+        actual_name = category_mapping[category_name]
+        logger.info(f"查找行业类别按钮：{actual_name}")
+        
+        # 尝试多种选择器查找行业类别按钮
+        selectors = [
+            f"//li[normalize-space(text())='{actual_name}']",
+            f"//a[normalize-space(text())='{actual_name}']",
+            f"//span[normalize-space(text())='{actual_name}']",
+            f"//td[normalize-space(text())='{actual_name}']",
+            f"//div[normalize-space(text())='{actual_name}']",
+            f"//a[contains(text(), '{actual_name}')]",
+        ]
+        
+        for selector in selectors:
+            try:
+                elements = driver.find_elements(By.XPATH, selector)
+                for elem in elements:
+                    if elem.text.strip() == actual_name:
+                        driver.execute_script("arguments[0].click();", elem)
+                        time.sleep(2)  # 等待数据加载
+                        logger.info(f"使用选择器 '{selector}' 成功点击行业类别：{actual_name}")
+                        return True
+            except Exception as e:
+                logger.debug(f"选择器 '{selector}' 失败：{str(e)}")
+                continue
+        
+        # 如果精确匹配失败，尝试模糊匹配
+        fuzzy_selectors = [
+            f"//a[contains(text(), '{actual_name}')]",
+            f"//span[contains(text(), '{actual_name}')]",
+            f"//td[contains(text(), '{actual_name}')]",
+        ]
+        
+        for selector in fuzzy_selectors:
+            try:
+                elements = driver.find_elements(By.XPATH, selector)
+                for elem in elements:
+                    text = elem.text.strip()
+                    if text == actual_name or actual_name in text:
+                        driver.execute_script("arguments[0].click();", elem)
+                        time.sleep(2)
+                        logger.info(f"使用模糊选择器 '{selector}' 成功点击行业类别：{actual_name}")
+                        return True
+            except Exception as e:
+                logger.debug(f"模糊选择器 '{selector}' 失败：{str(e)}")
+                continue
+        
+        logger.warning(f"未找到行业类别按钮：{actual_name}")
+        return False
+        
+    except Exception as e:
+        logger.error(f"点击行业类别失败：{str(e)}")
+        return False
+
+
+def navigate_and_click_rank_period(driver, period="2025 年度排行", category="全部"):
+    """导航到目标页面并点击指定时间段排行和行业类别"""
     try:
         logger.info("正在打开目标页面...")
         driver.get("https://data.eastmoney.com/invest/invest/list.html")
@@ -191,6 +287,18 @@ def navigate_and_click_rank_period(driver, period="2025 年度排行"):
                 pass
             return False
         
+        # 点击行业类别
+        if category != "全部":
+            logger.info(f"正在点击行业类别：{category}...")
+            category_clicked = click_industry_category(driver, category)
+            if category_clicked:
+                logger.info(f"成功点击行业类别：{category}")
+            else:
+                logger.warning(f"未能点击行业类别：{category}，将使用默认'全部'类别")
+            time.sleep(2)
+        else:
+            logger.info("行业类别为'全部'，不需要点击")
+
         logger.info("页面加载完成")
         return True
     except Exception as e:
@@ -1200,27 +1308,65 @@ def main():
         logger.info("===== 东方财富分析师数据采集整合脚本开始执行 =====")
         
         # 获取命令行参数
-        if len(sys.argv) < 3:
-            logger.error("用法: python consolidated_analyst_crawler.py <category_index> <period_index>")
-            logger.error("例如: python consolidated_analyst_crawler.py  0 0")
-            logger.error("period_index: 0=2025 年度排行, 1=最新总排行, 2=3个月排行, 3=6个月排行, 4=12个月排行")
-            logger.error("category: 0=全部, 1=农林牧渔, 2=基础化工， 3=钢铁， 4=有色金属， 5=电子元器件， 6=计算机， 7=通信， 8=传媒， 9=家用电器， 10=食品饮料， 11=纺织服装， 12=轻工制造， 13=医药生物， 14=公用事业， 15=交通运输， 16=房地产， 17=建筑材料， 18=建筑装饰， 19=机械设备， 20=汽车， 21=商业贸易， 22=休闲服务， 23=银行， 24=非银金融")
-            logger.error(f"未提供足够参数，请再次运行程序并提供所需参数 。当前参数数量: {len(sys.argv)-1}")
-            return
-        else:
-            category_index = int(sys.argv[1])   
-            period_index = int(sys.argv[2])
-
-        # 定义时间段选项
-        periods = ["2025 年度排行", "最新总排行", "3个月排行", "6个月排行", "12个月排行"]
-        if period_index < 0 or period_index >= len(periods):
-            logger.error(f"期间索引超出范围。有效范围: 0-{len(periods)-1}")
-            return
-        categors = ["全部", "农林牧渔", "基础化工", "钢铁", "有色金属", "电子元器件", "计算机", "通信", "传媒", "家用电器", "食品饮料", "纺织服装", "轻工制造", "医药生物", "公用事业", "交通运输", "房地产", "建筑材料", "建筑装饰", "机械设备", "汽车", "商业贸易", "休闲服务", "银行", "非银金融"]
-        if category_index < 0 or category_index >= len(categors):
-            logger.error(f"类别索引超出范围。有效范围: 0-{len(categors)-1}")
-            return
+        # 定义行业类别选项（共 31 个）
+        categors = ["全部", "农林牧渔", "基础化工", "钢铁", "有色金属", "电子", "汽车", "家用电器", "食品饮料", "纺织服饰",
+                    "轻工制造", "医药生物", "公用事业", "交通运输", "房地产", "商贸零售", "社会服务", "银行", "非银金融", "建筑材料",
+                    "建筑装饰", "电力设备", "机械设备", "国防军工", "计算机", "传媒", "通信", "煤炭", "石油石化", "环保",
+                    "美容护理"]
         
+        # 定义时间段选项
+        periods = ["2025 年度排行", "最新总排行", "3 个月排行", "6 个月排行", "12 个月排行"]
+        
+        # 获取命令行参数，若未提供则交互式提示用户
+        if len(sys.argv) < 3:
+            # 交互式选择
+            print("\n" + "="*60)
+            print("东方财富分析师数据自动化采集 - 行业类别选择")
+            print("="*60)
+            for i, cat in enumerate(categors):
+                print(f"  {i:2d}. {cat}")
+            print("="*60)
+            
+            while True:
+                try:
+                    category_input = input(f"请选择行业类别 (输入数字 0-{len(categors)-1}): ").strip()
+                    category_index = int(category_input)
+                    if 0 <= category_index < len(categors):
+                        break
+                    else:
+                        print(f"输入无效，请输入 0-{len(categors)-1} 之间的数字")
+                except ValueError:
+                    print("输入无效，请输入数字")
+            
+            print("\n" + "="*60)
+            print("时间段选择")
+            print("="*60)
+            for i, period in enumerate(periods):
+                print(f"  {i}. {period}")
+            print("="*60)
+            
+            while True:
+                try:
+                    period_input = input(f"请选择时间段 (输入数字 0-{len(periods)-1}): ").strip()
+                    period_index = int(period_input)
+                    if 0 <= period_index < len(periods):
+                        break
+                    else:
+                        print(f"输入无效，请输入 0-{len(periods)-1} 之间的数字")
+                except ValueError:
+                    print("输入无效，请输入数字")
+        else:
+            category_index = int(sys.argv[1])
+            period_index = int(sys.argv[2])
+            
+            # 验证参数范围
+            if category_index < 0 or category_index >= len(categors):
+                logger.error(f"类别索引超出范围。有效范围：0-{len(categors)-1}")
+                return
+            if period_index < 0 or period_index >= len(periods):
+                logger.error(f"期间索引超出范围。有效范围：0-{len(periods)-1}")
+                return
+
         category = categors[category_index]
         period = periods[period_index]
 
@@ -1238,7 +1384,7 @@ def main():
         driver = setup_driver()
 
         # 导航到目标页面并点击指定时间段
-        if not navigate_and_click_rank_period(driver, period):
+        if not navigate_and_click_rank_period(driver, period, category):
             logger.error("无法打开目标页面，程序终止")
             return
 

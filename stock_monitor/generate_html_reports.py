@@ -8,9 +8,9 @@
 import os
 import json
 from datetime import datetime
-from analyst_data_fetcher import get_combined_analyst_data
+from analyst_data_fetcher import get_analyst_combined_data
 from industry_data_fetcher import get_industry_ranking, get_industry_constituents
-from analyst_data_fetcher import get_recently_updated_stocks
+from analyst_data_fetcher import get_analyst_updated_stocks
 from logger_config import logger, gconfig
 
 OUTPUT_DIR = gconfig.get('analyst_data_dir', 'reports')
@@ -527,7 +527,7 @@ def generate_analyst_report(top_analysts=20, top_stocks=50, period="3个月"):
     logger.info(f"开始生成分析师数据报告，周期: {period}")
     
     # 获取分析师数据
-    analyst_data = get_combined_analyst_data(top_analysts=top_analysts, top_stocks=top_stocks, period=period)
+    analyst_data = get_analyst_combined_data(top_analysts=top_analysts, top_stocks=top_stocks, period=period)
     
     if not analyst_data:
         logger.warning("未能获取分析师数据")
@@ -550,7 +550,7 @@ def generate_recently_updated_stocks_report(days=30, indicator="最新跟踪成�
     logger.info(f"开始生成分析师最近更新股票报告，天数阈值: {days}天, 指标: {indicator}")
     
     # 获取最近更新的股票数据
-    recently_updated_stocks = get_recently_updated_stocks(days=days, indicator=indicator)
+    recently_updated_stocks = get_analyst_updated_stocks(days=days, indicator=indicator)
     
     if not recently_updated_stocks:
         logger.warning("未能获取最近更新的股票数据")

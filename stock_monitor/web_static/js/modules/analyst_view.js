@@ -1,199 +1,259 @@
 // 分析师数据页面的JavaScript功能模块
 
-// 加载分析师数据
-function loadAnalystData() {
-    const analystContainer = document.getElementById('analyst-data-container');
-    analystContainer.innerHTML = '<div class="loading">正在加载分析师数据... <span id="analyst-progress">0%</span></div>';
-    
-    const selectedPeriod = document.getElementById('analyst-period-select').value;
-    const selectedTopAnalysts = document.getElementById('analyst-top-analysts-select').value;
-    const selectedTopStocks = document.getElementById('analyst-top-stocks-select').value;
-    console.log(`请求分析师数据，时间周期: ${selectedPeriod}, 前${selectedTopAnalysts}名分析师, 前${selectedTopStocks}只股票`);
-    
-    // 更新进度 - 检查元素是否存在
-    const updateProgress = (percentage) => {
-        const progressElement = document.getElementById('analyst-progress');
-        if (progressElement) {
-            progressElement.textContent = percentage;
-        } else {
-            console.log(`进度: ${percentage}`); // 如果元素不存在，记录到控制台
-        }
-    };
-    
-    // 更新进度
-    updateProgress('10%');
-    
-    // 串行请求两个API端点（取消并行请求）
-    // 首先请求分析师重点关注股票数据
-    fetch(`/api/analyst/focus_stocks?period=${encodeURIComponent(selectedPeriod)}&top_analysts=${selectedTopAnalysts}&top_stocks=${selectedTopStocks}`)
-    .then(focusStocksResponse => {
-        updateProgress('50%');
-        return focusStocksResponse.json();
-    })
-    .then(focusStocksData => {
-        // 然后请求最新跟踪数据（串行执行）
-        return fetch(`/api/analyst/latest_tracking?period=${encodeURIComponent(selectedPeriod)}&top_analysts=${selectedTopAnalysts}`)
-        .then(latestTrackingResponse => {
-            updateProgress('80%');
-            return Promise.all([Promise.resolve(focusStocksData), latestTrackingResponse.json()]);
-        });
-    })
-    .then(([focusStocksData, latestTrackingData]) => {
-        updateProgress('100%');
-        console.log('收到分析师重点关注股票数据:', focusStocksData);
-        console.log('收到最新跟踪数据:', latestTrackingData);
-        
-        let formattedHtml = '<div class="analyst-content">';
-        
-        // 添加数据摘要
-        formattedHtml += `
-            <div class="analyst-summary">
-                <h3>数据摘要</h3>
-                <p>所有分析师按所选时间段的收益率排名，按前N名分析师所持股重复次数排名</p>
-                <p>实际处理分析师数量: ${focusStocksData.data ? focusStocksData.data.total_analysts_processed : 0}</p>
-                <p>最新跟踪成份唯一股票数量: ${focusStocksData.data ? focusStocksData.data.latest_unique_stocks : 0}</p>
-                <p>多个分析师跟踪的股票数量: ${focusStocksData.data ? focusStocksData.data.latest_focus_stocks : 0}</p>
-                <p>最新跟踪成份总的股票数量: ${latestTrackingData.success ? latestTrackingData.data.length : 0}</p>
-            </div>
-        `;
-        
-        // 显示分析师重点关注股票
-        if (focusStocksData.success && focusStocksData.data && focusStocksData.data.top_focus_stocks) {
-            // 根据选择的股票数量决定显示数量，最多显示100只
-            const displayLimit = Math.min(100, parseInt(selectedTopStocks) || 50);
-            const topFocusStocks = focusStocksData.data.top_focus_stocks.slice(0, displayLimit); // 只显示指定数量的股票
-            if (topFocusStocks.length > 0) {
-                formattedHtml += `
-                    <h3>分析师重点关注股票（前${topFocusStocks.length}只）</h3>
-                    <table class="analyst-table">
-                        <thead>
-                            <tr>
-                                <th>分析师关注数量</th>
-                                <th>股票代码</th>
-                                <th>股票名称</th>
-                                <th>平均成交价格</th>
-                                <th>最高成交价格</th>
-                                <th>最低成交价格</th>
-                                <th>最新价格</th>
-                                <th>同行比较</th>
-                                <th>历史跟踪图表</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                `;
-                topFocusStocks.forEach(stock => {
-                    formattedHtml += `
-                        <tr>
-                            <td>${stock.analyst_count || 0}</td>
-                            <td>${stock.stock_code || ''}</td>
-                            <td>${stock.stock_name || ''}</td>
-                            <td>${stock.avg_price != null ? stock.avg_price.toFixed(2) : 'N/A'}</td>
-                            <td>${stock.max_price != null ? stock.max_price.toFixed(2) : 'N/A'}</td>
-                            <td>${stock.min_price != null ? stock.min_price.toFixed(2) : 'N/A'}</td>
-                            <td>${stock.latest_price != null ? (typeof stock.latest_price === 'number' ? stock.latest_price.toFixed(2) : stock.latest_price) : 'N/A'}</td>
-                            <td><button onclick="openEastMoneyPeerComparison('${stock.stock_code}')">同行比较</button></td>
-                            <td><button onclick="showAnalystHistoryChart('${stock.stock_code}')">历史跟踪图表</button></td>
-                        </tr>
-                    `;
-                });
-                formattedHtml += '</tbody></table>';
-            } else {
-                formattedHtml += '<p>暂无重点关注股票数据</p>';
+// 缓存工具函数
+const AnalystCache = {
+    // 生成缓存键
+    generateKey: function(baseKey, params) {
+        const paramString = Object.keys(params).sort().map(key => `${key}=${params[key]}`).join('&');
+        return `${baseKey}?${paramString}`;
+    },
+
+    // 获取缓存数据
+    get: function(key) {
+        try {
+            const cached = localStorage.getItem(key);
+            if (cached) {
+                const parsed = JSON.parse(cached);
+                // 检查是否过期
+                const now = new Date().getTime();
+                if (now < parsed.expiry) {
+                    console.log(`从缓存获取数据: ${key}`);
+                    return parsed.data;
+                } else {
+                    // 缓存过期，删除它
+                    localStorage.removeItem(key);
+                    console.log(`缓存已过期并删除: ${key}`);
+                }
             }
-        } else {
-            formattedHtml += `<p class="error">获取分析师重点关注股票失败: ${focusStocksData.message || '未知错误'}</p>`;
-        }
-        
-        // 显示最新跟踪成份股数据
-        if (latestTrackingData.success && latestTrackingData.data) {
-            if (latestTrackingData.data.length > 0) {
-                // 使用Tabulator表格显示最新跟踪成份股数据
-                formattedHtml += `
-                    <h3>最新跟踪成份股</h3>
-                    <div id="latest-tracking-table-container"></div>
-                `;
-            } else {
-                formattedHtml += '<p>暂无最新跟踪成份股数据</p>';
+        } catch (e) {
+            console.warn('读取缓存失败:', e);
+            // 如果解析失败，删除损坏的缓存
+            try {
+                localStorage.removeItem(key);
+            } catch (removeErr) {
+                console.error('删除损坏缓存失败:', removeErr);
             }
+        }
+        return null;
+    },
+
+    // 设置缓存数据
+    set: function(key, data, ttlMinutes = 5) { // 默认30分钟过期
+        try {
+            const expiry = new Date().getTime() + (ttlMinutes * 60 * 1000);
+            const cacheItem = {
+                data: data,
+                expiry: expiry
+            };
+            localStorage.setItem(key, JSON.stringify(cacheItem));
+            console.log(`数据已缓存: ${key}, 过期时间: ${ttlMinutes}分钟`);
+        } catch (e) {
+            console.warn('设置缓存失败，可能是存储空间不足:', e);
+        }
+    },
+
+    // 清除特定缓存
+    clear: function(key) {
+        try {
+            localStorage.removeItem(key);
+            console.log(`缓存已清除: ${key}`);
+        } catch (e) {
+            console.error('清除缓存失败:', e);
+        }
+    },
+
+    // 清除所有分析师相关缓存
+    clearAll: function() {
+        try {
+            Object.keys(localStorage).forEach(key => {
+                if (key.startsWith('analyst_')) {
+                    localStorage.removeItem(key);
+                }
+            });
+            console.log('所有分析师缓存已清除');
+        } catch (e) {
+            console.error('清除所有缓存失败:', e);
+        }
+    }
+};
+
+//========================================================================================
+// 渲染分析师重点关注股票数据 - 使用Tabulator
+function renderAnalystFocusStocks(focusStocksData) {
+    const analystContainer = document.getElementById('analyst-focus-stocks-container');
+
+    // 显示分析师重点关注股票
+    if (focusStocksData.success && focusStocksData.data && focusStocksData.data.top_focus_stocks) {
+        // 获取当前页面参数
+        const periodSelect = document.getElementById('analyst-period-select');
+        const topStocksSelect = document.getElementById('analyst-top-stocks-select');
+        const selectedTopAnalystsSelect = document.getElementById('analyst-top-analysts-select');
+
+        const period = periodSelect ? periodSelect.value : '3个月';
+        const topStocks = topStocksSelect ? topStocksSelect.value : 50;
+        const topAnalysts = selectedTopAnalystsSelect ? selectedTopAnalystsSelect.value : 50;
+
+        const displayLimit = Math.min(100, parseInt(topStocks) || 50);
+        const topFocusStocks = focusStocksData.data.top_focus_stocks.slice(0, displayLimit); // 只显示指定数量的股票
+
+        if (topFocusStocks.length > 0) {
+            // 创建带统计信息的布局，将统计信息移到表格上方
+            analystContainer.innerHTML = `
+                <div class="analyst-full-width-panel">
+                    <div class="analyst-summary">
+                        <h3>重点关注股票摘要</h3>
+                        <p><strong>算法说明：</strong>统计所选分析师范围内，被最多分析师跟踪的股票，按关注数量排序；历史跟踪数据是基于默认参数计算的分析师个数</p>
+                        <p><strong>数据统计：</strong>处理分析师: ${focusStocksData.data.total_analysts_processed || 0} |
+                           跟踪股票总数: ${focusStocksData.data.latest_unique_stocks || 0} |
+                           多人关注股票: ${focusStocksData.data.latest_focus_stocks || 0}</p>
+                    </div>
+                    <div class="analyst-data-panel">
+                        <div id="focus-stocks-table-container"></div>
+                    </div>
+                </div>
+            `;
+
+            // 初始化Tabulator表格
+            initFocusStocksTable(topFocusStocks);
         } else {
-            formattedHtml += `<p class="error">获取最新跟踪成份股数据失败: ${latestTrackingData.message || '未知错误'}</p>`;
+            analystContainer.innerHTML = '<div class="analyst-focus-stocks-section"><p>暂无重点关注股票数据</p></div>';
         }
-        
-        formattedHtml += '</div>';
-        analystContainer.innerHTML = formattedHtml;
-        
-        // 如果有最新跟踪数据，初始化Tabulator表格
-        if (latestTrackingData.success && latestTrackingData.data && latestTrackingData.data.length > 0) {
-            // 等待DOM更新后初始化表格
-            setTimeout(() => {
-                initLatestTrackingTable(latestTrackingData.data);
-            }, 100);
-        }
-    })
-    .catch(error => {
-        console.error('加载分析师数据时出错:', error);
-        analystContainer.innerHTML = `<div class="error">加载分析师数据失败: ${error.message}</div>`;
-    });
+    } else {
+        analystContainer.innerHTML = `<div class="analyst-focus-stocks-section"><p class="error">获取分析师重点关注股票失败: ${focusStocksData.message || '未知错误'}</p></div>`;
+    }
 }
 
-// 初始化最新跟踪成份股表格（使用Tabulator）
-function initLatestTrackingTable(data) {
-    const container = document.getElementById('latest-tracking-table-container');
-    if (!container) return;
+// 初始化重点关注股票表格
+function initFocusStocksTable(data) {
+    const container = document.getElementById('focus-stocks-table-container');
     
     // 定义列
     const columns = [
-        {title: "分析师名称", field: "analyst_name", width: 120, headerSort: true},
-        {title: "分析师行业", field: "analyst_industry", width: 120, headerSort: true},
-        {title: "期间收益", field: "analyst_period_return", width: 100, headerSort: true, sorter: "number"},
-        {title: "25总收益", field: "analyst_total_return", width: 100, headerSort: true, sorter: "number"},
-        {title: "股票代码", field: "股票代码", width: 100, headerSort: true},
-        {title: "股票名称", field: "股票名称", width: 120, headerSort: true},
-        {title: "调入日期", field: "调入日期", width: 100, headerSort: true, sorter: "date", sorterParams: {format: "YYYY-MM-DD"}},
-        {title: "成交价格(前复权)", field: "成交价格(前复权)", width: 140, headerSort: true, sorter: "number"},
-        {title: "最新价格", field: "最新价格", width: 100, headerSort: true, sorter: "number"},
-        {title: "阶段涨跌幅", field: "阶段涨跌幅", width: 120, headerSort: true, sorter: "number", formatter: "money", formatterParams: {precision: 2, symbol: "%"}},
-        {title: "当前评级名称", field: "当前评级名称", width: 120, headerSort: true},
-        {title: "同行比较", field: "股票代码", width: 100, headerSort: false, formatter: function(cell, formatterParams, onRendered) {
-            const stockCode = cell.getValue();
-            return `<button onclick="openEastMoneyPeerComparison('${stockCode}')">同行比较</button>`;
-        }}
+        {title: "分析师关注数量", field: "analyst_count", width: 140, headerSort: true,
+            formatter: function(cell, formatterParams, onRendered) {
+                const value = cell.getValue();
+                return value;
+            }
+        },
+        {title: "股票代码", field: "stock_code", width: 100, headerSort: true},
+        {title: "股票名称", field: "stock_name", width: 120, headerSort: true},
+        {title: "平均成交价格", field: "avg_price", width: 140, headerSort: true, 
+            formatter: function(cell, formatterParams, onRendered) {
+                const value = cell.getValue();
+                return value != null ? value.toFixed(2) : 'N/A';
+            }
+        },
+        {title: "最高成交价格", field: "max_price", width: 140, headerSort: true, 
+            formatter: function(cell, formatterParams, onRendered) {
+                const value = cell.getValue();
+                return value != null ? value.toFixed(2) : 'N/A';
+            }
+        },
+        {title: "最低成交价格", field: "min_price", width: 140, headerSort: true, 
+            formatter: function(cell, formatterParams, onRendered) {
+                const value = cell.getValue();
+                return value != null ? value.toFixed(2) : 'N/A';
+            }
+        },
+        {title: "最新价格", field: "latest_price", width: 100, headerSort: true, 
+            formatter: function(cell, formatterParams, onRendered) {
+                const value = cell.getValue();
+                return value != null ? (typeof value === 'number' ? value.toFixed(2) : value) : 'N/A';
+            }
+        },
+        {title: "同行比较", field: "stock_code", width: 120, headerSort: false, 
+            formatter: function(cell, formatterParams, onRendered) {
+                const stockCode = cell.getValue();
+                return `<button onclick="openEastMoneyPeerComparison('${stockCode}')">同行比较</button>`;
+            }
+        },
+        {title: "历史跟踪", field: "stock_code", width: 150, headerSort: false, 
+            formatter: function(cell, formatterParams, onRendered) {
+                const stockCode = cell.getValue();
+                return `<button onclick="showAnalystHistoryChart('${stockCode}')">历史跟踪</button>`;
+            }
+        }
     ];
 
-    // 初始化Tabulator表格
-    const table = new Tabulator("#latest-tracking-table-container", {
+    // 创建Tabulator实例
+    const table = new Tabulator(container, {
         data: data,
         columns: columns,
         layout: "fitDataStretch",
-        pagination: true,
-        paginationSize: 25,
-        paginationSizeSelector: [10, 25, 50, 100, true],
+        pagination: false, // 关闭分页
         movableColumns: true,
         columnHeaderVertAlign: "bottom",
         initialSort: [
-            {column: "调入日期", dir: "desc"} // 默认按调入日期降序排列
-        ]
+            {column: "analyst_count", dir: "desc"} // 默认按关注数量降序排列
+        ],
+        rowFormatter: function(row) {
+            // 为行添加颜色编码 - 使用与行业板块一致的蓝色系
+            // 这里我们可以使用一个统一的基准，比如根据分析师关注数量来设置背景色
+            const rowData = row.getData();
+            const analystCount = rowData.analyst_count || 0;
+            // 使用一个合理的基准值，比如最大预期关注数为20
+            const intensity = Math.min(analystCount / 20, 1); // 假设最大关注数为20
+            const bgColor = `rgba(52, 152, 219, ${0.1 + intensity * 0.3})`; // 蓝色系，与行业板块一致
+            row.getElement().style.backgroundColor = bgColor;
+        }
+    });
+
+    return table;
+}
+
+// 加载分析师重点关注股票数据
+function loadAnalystFocusStocks() {
+    console.log('正在加载分析师重点关注股票数据...');
+
+    // 获取选择的参数
+    const periodSelect = document.getElementById('analyst-period-select');
+    const topStocksSelect = document.getElementById('analyst-top-stocks-select');
+    const selectedTopAnalystsSelect = document.getElementById('analyst-top-analysts-select');
+
+    const period = periodSelect ? periodSelect.value : '3个月';
+    const topStocks = topStocksSelect ? topStocksSelect.value : 50;
+    const topAnalysts = selectedTopAnalystsSelect ? selectedTopAnalystsSelect.value : 50;
+
+    // 显示加载状态
+    const analystContainer = document.getElementById('analyst-focus-stocks-container');
+    analystContainer.innerHTML = '<div class="loading">正在加载分析师重点关注股票数据...</div>';
+
+    // 构建API请求URL
+    const apiUrl = `/api/analyst/focus_stocks?period=${encodeURIComponent(period)}&top_analysts=${encodeURIComponent(topAnalysts)}&top_stocks=${encodeURIComponent(topStocks)}`;
+
+    // 调用API获取数据
+    fetch(apiUrl)
+    .then(response => response.json())
+    .then(data => {
+        console.log('收到分析师重点关注股票数据:', data);
+        // 调用渲染函数
+        renderAnalystFocusStocks(data);
+    })
+    .catch(error => {
+        console.error('加载分析师重点关注股票数据时出错:', error);
+        analystContainer.innerHTML = `<div class="error">加载分析师重点关注股票数据失败: ${error.message}</div>`;
     });
 }
 
+//========================================================================================
 // 加载最近更新的股票数据
-function loadRecentlyUpdatedStocks() {
+function loadAnalystUpdatedStocks() {
     console.log('正在加载最近更新的股票数据...');
     // 检查Tabulator是否已加载，如果没有则加载
     if (typeof Tabulator === 'undefined') {
         console.error('Tabulator库未加载');
-        const analystContainer = document.getElementById('analyst-data-container');
+        const analystContainer = document.getElementById('analyst-latest-tracking-container');
         analystContainer.innerHTML = '<div class="error">Tabulator库未加载，请检查网络连接或联系管理员</div>';
         return;
     }
 
     // Tabulator已加载，继续执行
-    const analystContainer = document.getElementById('analyst-data-container');
+    const analystContainer = document.getElementById('analyst-latest-tracking-container');
     analystContainer.innerHTML = '<div class="loading">正在加载最近更新的股票数据... <span id="recently-updated-progress">0%</span></div>';
-    
+
     // 获取天数输入
     const daysInput = document.getElementById('date-threshold-input').value;
-    let days = 7; // 默认值
+    let days = 30; // 默认值
     if (daysInput) {
         const parsedDays = parseInt(daysInput);
         if (!isNaN(parsedDays) && parsedDays > 0) {
@@ -201,7 +261,18 @@ function loadRecentlyUpdatedStocks() {
         }
     }
     console.log(`请求最近更新的股票数据，天数: ${days}`);
-    
+
+    // 生成缓存键
+    const recentlyUpdatedCacheKey = AnalystCache.generateKey('analyst_recently_updated_stocks', {days: days});
+
+    // 尝试从缓存获取数据
+    const cachedData = AnalystCache.get(recentlyUpdatedCacheKey);
+    if (cachedData) {
+        console.log('使用缓存的最近更新股票数据');
+        renderRecentlyUpdatedStocks(cachedData, analystContainer);
+        return;
+    }
+
     // 更新进度 - 检查元素是否存在
     const updateProgress = (percentage) => {
         const progressElement = document.getElementById('recently-updated-progress');
@@ -211,13 +282,13 @@ function loadRecentlyUpdatedStocks() {
             console.log(`进度: ${percentage}`); // 如果元素不存在，记录到控制台
         }
     };
-    
+
     // 更新进度
     updateProgress('20%');
-    
+
     // 构建API请求URL
-    const apiUrl = `/api/analyst/recently_updated_stocks?days=${days}`;
-    
+    const apiUrl = `/api/analyst/updated_stocks?days=${days}`;
+
     // 调用API获取最近更新的股票数据
     fetch(apiUrl)
     .then(response => {
@@ -227,25 +298,13 @@ function loadRecentlyUpdatedStocks() {
     .then(data => {
         updateProgress('100%');
         console.log('收到最近更新的股票数据:', data);
-        
+
         if (data.success) {
+            // 缓存数据
+            AnalystCache.set(recentlyUpdatedCacheKey, data, 15); // 15分钟缓存
+
             // 使用Tabulator功能显示数据
-            if (typeof initRecentlyUpdatedStocksTable !== 'undefined') {
-                // 清空容器并添加数据摘要
-                let formattedHtml = `
-                    <div class="analyst-summary">
-                        <h3>最近更新股票数据摘要</h3>
-                        <p>日期阈值: ${data.days}天</p>
-                        <p>符合条件的股票总数: ${data.data.length}</p>
-                    </div>
-                `;
-                analystContainer.innerHTML = formattedHtml;
-                // 初始化Tabulator表格
-                initRecentlyUpdatedStocksTable(data.data);
-            } else {
-                console.error('initRecentlyUpdatedStocksTable函数未定义');
-                analystContainer.innerHTML = `<div class="error">initRecentlyUpdatedStocksTable函数未定义</div>`;
-            }
+            renderRecentlyUpdatedStocks(data, analystContainer);
         } else {
             analystContainer.innerHTML = `<div class="error">获取最近更新的股票数据失败: ${data.message}</div>`;
         }
@@ -256,6 +315,149 @@ function loadRecentlyUpdatedStocks() {
     });
 }
 
+// 渲染最近更新的股票数据
+function renderRecentlyUpdatedStocks(data, container) {
+    // 计算统计信息
+    const analystsSet = new Set();
+    const stocksSet = new Set();
+    const stockAnalystCount = {}; // 记录每个股票被多少个分析师跟踪
+
+    data.data.forEach(item => {
+        // 统计分析师
+        if (item.analyst_name) {
+            analystsSet.add(item.analyst_name);
+        }
+
+        // 统计股票
+        if (item['股票代码']) {
+            stocksSet.add(item['股票代码']);
+
+            // 记录每个股票被多少个分析师跟踪
+            if (!stockAnalystCount[item['股票代码']]) {
+                stockAnalystCount[item['股票代码']] = 0;
+            }
+            stockAnalystCount[item['股票代码']]++;
+        }
+    });
+
+    // 计算被多个分析师跟踪的股票数量
+    const multiAnalystStocks = Object.values(stockAnalystCount).filter(count => count > 1).length;
+
+    // 清空容器并添加数据摘要，将统计信息移到表格上方
+    let formattedHtml = `
+        <div class="analyst-full-width-panel">
+            <div class="analyst-summary">
+                <h3>最近更新股票数据摘要</h3>
+                <p><strong>算法说明：</strong>筛选最近${data.days}天内有更新的分析师，获取其跟踪的最新股票</p>
+                <p><strong>参数设置：</strong>时间范围: 最近${data.days}天</p>
+                <p><strong>数据统计：</strong>符合条件分析师: ${analystsSet.size} |
+                   符合条件股票: ${data.data.length} |
+                   唯一股票: ${stocksSet.size} |
+                   多人关注: ${multiAnalystStocks}</p>
+                <p><strong>数据密度：</strong>人均跟踪: ${(data.data.length/analystsSet.size).toFixed(1)}只 |
+                   重复度: ${(multiAnalystStocks/stocksSet.size*100).toFixed(1)}%</p>
+            </div>
+            <div class="analyst-data-panel">
+                <div id="recently-updated-stocks-table-container"></div>
+            </div>
+        </div>
+    `;
+    container.innerHTML = formattedHtml;
+
+    // 初始化Tabulator表格
+    initRecentlyUpdatedStocksTable(data.data);
+}
+
+// 初始化最近更新股票表格
+function initRecentlyUpdatedStocksTable(data) {
+    const container = document.getElementById('recently-updated-stocks-table-container');
+    
+    const columns = [
+        {title: "分析师名称", field: "analyst_name", width: 120, headerSort: true},
+        {title: "分析师行业", field: "analyst_industry", width: 120, headerSort: true},
+        {title: "股票代码", field: "股票代码", width: 100, headerSort: true},
+        {title: "股票名称", field: "股票名称", width: 120, headerSort: true},
+        {title: "调入日期", field: "调入日期", width: 100, headerSort: true, sorter: "string"},
+        {title: "最新评级日期", field: "最新评级日期", width: 120, headerSort: true, sorter: "string"},
+        {title: "成交价格(前复权)", field: "成交价格(前复权)", width: 140, headerSort: true, sorter: "number"},
+        {title: "最新价格", field: "最新价格", width: 100, headerSort: true, sorter: "number"},
+        {title: "阶段涨跌幅", field: "阶段涨跌幅", width: 120, headerSort: true,
+            sorter: "number",
+            formatter: function(cell, formatterParams, onRendered) {
+                const value = cell.getValue();
+                const numValue = typeof value === 'number' ? value : parseFloat(value);
+                const displayValue = isNaN(numValue) ? value : (numValue >= 0 ? '+' : '') + numValue.toFixed(2) + '%';
+                if(!isNaN(numValue)) {
+                    cell.getElement().style.color = numValue >= 0 ? '#28a745' : '#dc3545'; // 绿色表示正值，红色表示负值
+                }
+                return displayValue;
+            }
+        },
+        {title: "当前评级名称", field: "当前评级名称", width: 120, headerSort: true},
+        {title: "分析师3个月收益率", field: "analyst_period_3m_return", width: 160, headerSort: true, sorter: "number",
+            formatter: function(cell, formatterParams, onRendered) {
+                const value = cell.getValue();
+                const numValue = typeof value === 'number' ? value : parseFloat(value);
+                const displayValue = isNaN(numValue) ? value : (numValue >= 0 ? '+' : '') + numValue.toFixed(2) + '%';
+                if(!isNaN(numValue)) {
+                    cell.getElement().style.color = numValue >= 0 ? '#28a745' : '#dc3545'; // 绿色表示正值，红色表示负值
+                }
+                return displayValue;
+            }
+        },
+        {title: "分析师6个月收益率", field: "analyst_period_6m_return", width: 160, headerSort: true, sorter: "number",
+            formatter: function(cell, formatterParams, onRendered) {
+                const value = cell.getValue();
+                const numValue = typeof value === 'number' ? value : parseFloat(value);
+                const displayValue = isNaN(numValue) ? value : (numValue >= 0 ? '+' : '') + numValue.toFixed(2) + '%';
+                if(!isNaN(numValue)) {
+                    cell.getElement().style.color = numValue >= 0 ? '#28a745' : '#dc3545'; // 绿色表示正值，红色表示负值
+                }
+                return displayValue;
+            }
+        },
+        {title: "分析师12个月收益率", field: "analyst_period_12m_return", width: 170, headerSort: true, sorter: "number",
+            formatter: function(cell, formatterParams, onRendered) {
+                const value = cell.getValue();
+                const numValue = typeof value === 'number' ? value : parseFloat(value);
+                const displayValue = isNaN(numValue) ? value : (numValue >= 0 ? '+' : '') + numValue.toFixed(2) + '%';
+                if(!isNaN(numValue)) {
+                    cell.getElement().style.color = numValue >= 0 ? '#28a745' : '#dc3545'; // 绿色表示正值，红色表示负值
+                }
+                return displayValue;
+            }
+        }
+    ];
+
+    // 创建Tabulator实例
+    const table = new Tabulator(container, {
+        data: data,
+        columns: columns,
+        layout: "fitDataStretch",
+        pagination: false, // 关闭分页
+        movableColumns: true,
+        columnHeaderVertAlign: "bottom",
+        initialSort: [
+            {column: "最新评级日期", dir: "desc"} // 默认按最新评级日期降序排列
+        ],
+        rowFormatter: function(row) {
+            // 为行添加颜色编码 - 使用与行业板块一致的蓝色系
+            const rowData = row.getData();
+            const changeValue = rowData['阶段涨跌幅'];
+            const numChange = typeof changeValue === 'number' ? changeValue : parseFloat(changeValue);
+            if (!isNaN(numChange)) {
+                // 使用统一的基准值，比如最大涨跌幅为10%
+                const intensity = Math.min(Math.abs(numChange) / 10, 1); // 限制在0-1之间，假设10%为最大强度
+                const bgColor = `rgba(52, 152, 219, ${0.1 + intensity * 0.3})`; // 蓝色系，与行业板块一致
+                row.getElement().style.backgroundColor = bgColor;
+            }
+        }
+    });
+
+    return table;
+}
+
+//========================================================================================
 // 打开东方财富同行比较页面
 function openEastMoneyPeerComparison(symbol) {
     // 确保股票代码格式正确（对于上海市场股票，需要在代码前加'sh'，深圳市场加'sz'）
@@ -267,14 +469,15 @@ function openEastMoneyPeerComparison(symbol) {
         // 深圳股票
         formattedSymbol = 'sz' + symbol;
     }
-    
+
     // 构建东方财富同行比较页面URL
     const url = `https://emweb.securities.eastmoney.com/pc_hsf10/pages/index.html?type=web&code=${formattedSymbol}&color=b#/thbj`;
-    
+
     // 在新窗口中打开URL
     window.open(url, '_blank');
 }
 
+//========================================================================================
 // 显示股票历史分析师跟踪图表
 function showAnalystHistoryChart(stockCode) {
     // 显示加载状态
@@ -295,20 +498,20 @@ function showAnalystHistoryChart(stockCode) {
         </div>
     `;
     document.body.appendChild(modal);
-    
+
     // 关闭按钮事件
     const closeBtn = modal.querySelector('.close');
     closeBtn.onclick = function() {
         modal.remove();
     };
-    
+
     // 点击模态框外部关闭
     window.onclick = function(event) {
         if (event.target === modal) {
             modal.remove();
         }
     };
-    
+
     // 加载历史数据并渲染图表
     loadAnalystHistoryData(stockCode, modal);
 }
@@ -318,18 +521,35 @@ function loadAnalystHistoryData(stockCode, modal) {
     // 获取选择的天数
     //const daysSelect = document.getElementById(`history-days-${stockCode}`);
     const days = 360;
-    
+
+    // 生成缓存键
+    const historyCacheKey = AnalystCache.generateKey('analyst_history_tracking', {stock_code: stockCode, days: days});
+
+    // 尝试从缓存获取数据
+    const cachedData = AnalystCache.get(historyCacheKey);
+    if (cachedData) {
+        console.log('使用缓存的历史跟踪数据');
+        const chartContainer = document.getElementById(`analyst-history-chart-${stockCode}`);
+        if (chartContainer) {
+            chartContainer.innerHTML = ''; // 清空加载状态
+        }
+        renderAnalystHistoryChart(stockCode, cachedData, modal);
+        return;
+    }
+
     // 显示加载状态
     const chartContainer = document.getElementById(`analyst-history-chart-${stockCode}`);
     if (chartContainer) {
         chartContainer.innerHTML = '<div class="loading">正在加载历史数据...</div>';
     }
-    
+
     // 获取历史数据
     fetch(`/api/analyst/history_tracking?stock_code=${stockCode}&days=${days}`)
     .then(response => response.json())
     .then(data => {
         if (data.success) {
+            // 缓存数据
+            AnalystCache.set(historyCacheKey, data.data, 60); // 60分钟缓存
             // 渲染图表
             renderAnalystHistoryChart(stockCode, data.data, modal);
         } else {
@@ -352,13 +572,13 @@ function loadAnalystHistoryData(stockCode, modal) {
 function renderAnalystHistoryChart(stockCode, chartData, modal) {
     const chartContainer = document.getElementById(`analyst-history-chart-${stockCode}`);
     if (!chartContainer) return;
-    
+
     // 清空容器
     chartContainer.innerHTML = '';
-    
+
     // 初始化ECharts
     const chart = echarts.init(chartContainer);
-    
+
     // 构建图表配置
     const option = {
         title: {
@@ -422,9 +642,9 @@ function renderAnalystHistoryChart(stockCode, chartData, modal) {
             end: 100
         }]
     };
-    
+
     chart.setOption(option);
-    
+
     // 响应窗口大小变化
     window.addEventListener('resize', function() {
         if (chart && typeof chart.resize === 'function') {
@@ -433,136 +653,4 @@ function renderAnalystHistoryChart(stockCode, chartData, modal) {
     });
 }
 
-// 加载标签页数据
-function loadTabData(symbol, tabName) {
-    const contentDiv = document.getElementById(`${tabName}-comparison-${symbol}`);
-    if (contentDiv.innerHTML.includes('正在加载')) {
-        // 防止重复加载
-        fetch(`/api/analyst/stock_${tabName}_comparison?symbol=${encodeURIComponent(symbol)}`)
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                const comparisonData = data.data;
-                if (comparisonData && comparisonData.length > 0) {
-                    // 创建表格显示数据
-                    let tableHtml = '<table class="peer-comparison-table">';
-                    // 添加表头
-                    tableHtml += '<thead><tr>';
-                    const firstRow = comparisonData[0];
-                    for (const key in firstRow) {
-                        tableHtml += `<th>${key}</th>`;
-                    }
-                    tableHtml += '</tr></thead>';
-                    
-                    // 添加数据行
-                    tableHtml += '<tbody>';
-                    comparisonData.forEach(row => {
-                        tableHtml += '<tr>';
-                        for (const key in firstRow) {
-                            const value = row[key] !== undefined ? row[key] : '';
-                            tableHtml += `<td>${value}</td>`;
-                        }
-                        tableHtml += '</tr>';
-                    });
-                    tableHtml += '</tbody></table>';
-                    
-                    contentDiv.innerHTML = tableHtml;
-                } else {
-                    contentDiv.innerHTML = '<p>暂无数据</p>';
-                }
-            } else {
-                contentDiv.innerHTML = `<p class="error">加载${tabName === 'growth' ? '成长性' : tabName === 'valuation' ? '估值' : '杜邦分析'}比较数据失败: ${data.message}</p>`;
-            }
-        })
-        .catch(error => {
-            contentDiv.innerHTML = `<p class="error">加载${tabName === 'growth' ? '成长性' : tabName === 'valuation' ? '估值' : '杜邦分析'}比较数据异常: ${error.message}</p>`;
-        });
-    }
-}
 
-// 显示同行比较数据（保留原函数以备后用）
-function showPeerComparison(symbol) {
-    console.log(`显示股票 ${symbol} 的同行比较数据`);
-    
-    // 创建模态框
-    const modal = document.createElement('div');
-    modal.className = 'modal';
-    modal.style.display = 'block';
-    modal.innerHTML = `
-        <div class="modal-content" style="max-width: 90%; max-height: 90vh; overflow: auto;">
-            <span class="close" style="float: right; font-size: 28px; font-weight: bold; cursor: pointer;">&times;</span>
-            <h3>股票 ${symbol} 同行比较数据</h3>
-            <div id="peer-comparison-tabs-${symbol}" class="peer-comparison-tabs">
-                <button class="tab-button active" data-tab="growth">成长性比较</button>
-                <button class="tab-button" data-tab="valuation">估值比较</button>
-                <button class="tab-button" data-tab="dupont">杜邦分析</button>
-            </div>
-            <div id="peer-comparison-content-${symbol}" class="peer-comparison-content">
-                <div id="growth-comparison-${symbol}" class="tab-content active">
-                    <div class="loading">正在加载成长性比较数据...</div>
-                </div>
-                <div id="valuation-comparison-${symbol}" class="tab-content">
-                    <div class="loading">正在加载估值比较数据...</div>
-                </div>
-                <div id="dupont-comparison-${symbol}" class="tab-content">
-                    <div class="loading">正在加载杜邦分析数据...</div>
-                </div>
-            </div>
-        </div>
-    `;
-    document.body.appendChild(modal);
-    
-    // 添加模态框关闭事件
-    const closeBtn = modal.querySelector('.close');
-    closeBtn.onclick = function() {
-        modal.remove();
-    };
-    
-    // 点击模态框外部关闭
-    window.onclick = function(event) {
-        if (event.target === modal) {
-            modal.remove();
-        }
-    };
-    
-    // 添加标签页切换功能
-    const tabButtons = modal.querySelectorAll('.tab-button');
-    tabButtons.forEach(button => {
-        button.addEventListener('click', function() {
-            const tabName = this.getAttribute('data-tab');
-            // 移除所有活动标签
-            tabButtons.forEach(btn => btn.classList.remove('active'));
-            const tabContents = modal.querySelectorAll('.tab-content');
-            tabContents.forEach(content => content.classList.remove('active'));
-            // 激活当前标签
-            this.classList.add('active');
-            document.getElementById(`${tabName}-comparison-${symbol}`).classList.add('active');
-            // 加载数据（如果尚未加载）
-            loadTabData(symbol, tabName);
-        });
-    });
-    
-    // 首次加载成长性比较数据
-    loadTabData(symbol, 'growth');
-}
-
-// 显示消息提示
-function showMessage(message, type) {
-    // 创建消息元素
-    const messageDiv = document.createElement('div');
-    messageDiv.className = type;
-    messageDiv.textContent = message;
-
-    // 添加到页面顶部
-    document.querySelector('.container').insertBefore(messageDiv, document.querySelector('.container').firstChild);
-
-    // 3秒后自动移除
-    setTimeout(() => {
-        messageDiv.remove();
-    }, 3000); // 修复：应该是3000毫秒，不是300毫秒
-}
-
-// 行业板块页面的初始化函数
-function initializeAnalystPage() {
-    console.log('分析师数据页面初始化完成');
-}
