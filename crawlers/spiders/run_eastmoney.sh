@@ -1,15 +1,18 @@
 #!/bin/bash
-# News crawler execution script
+# eastmoney crawler execution script
+
+# 加载配置
+source /root/config.sh
 
 # 设置配置文件路径环境变量，确保Python脚本能找到配置文件
 export CONFIG_FILE="/root/config.ini"
 
 set -euo pipefail
 
-SCRIPT_DIR="/root/news"
-PYTHON_SCRIPT="crawl_save_news.py"
-DATA_DIR="/data/news"
-LOG_FILE="/var/log/news_crawler.log"
+SCRIPT_DIR="$CRAWLERS_SPIDERS_DIR"
+PYTHON_SCRIPT="eastmoney_analyst.py"
+DATA_DIR="$ANALYST_DATA_DIR"
+LOG_FILE="$CRON_LOG/eastmoney_analyst.log"
 TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
 
 log() {
@@ -29,12 +32,12 @@ check_prerequisites() {
         error "Script directory does not exist: $SCRIPT_DIR"
         return 1
     fi
-    
+
     if [ ! -f "$SCRIPT_DIR/$PYTHON_SCRIPT" ]; then
         error "Python script does not exist: $SCRIPT_DIR/$PYTHON_SCRIPT"
         return 1
     fi
-    
+
     if [ ! -d "$DATA_DIR" ]; then
         warn "Data directory does not exist, creating: $DATA_DIR"
         mkdir -p "$DATA_DIR" || {
@@ -42,7 +45,7 @@ check_prerequisites() {
             return 1
         }
     fi
-    
+
     local log_dir=$(dirname "$LOG_FILE")
     if [ ! -d "$log_dir" ]; then
         mkdir -p "$log_dir"
@@ -50,48 +53,61 @@ check_prerequisites() {
 }
 
 run_python_crawler() {
-    log "Starting Python crawler..."
-    
+    log "Starting PYTHON_SCRIPT..."
+
     cd "$SCRIPT_DIR" || {
         error "Cannot change to directory: $SCRIPT_DIR"
         return 1
     }
-    
+
     if ! command -v python3 >/dev/null 2>&1; then
         error "python3 command not found"
         return 1
     fi
-    
-    if python3 "$PYTHON_SCRIPT" 2>&1 | tee -a "$LOG_FILE"; then
+
+    # if python3 /root/stock_monitor/scripts/generate_html_reports.py 2>&1 | tee -a "$LOG_FILE"; then
+    #     log "Python crawler executed successfully"
+    # else
+    #     error "Python generate_html_reports execution failed"
+    # fi
+
+    if python3 "$PYTHON_SCRIPT" 0 0 2>&1 | tee -a "$LOG_FILE"; then
         log "Python crawler executed successfully"
-        return 0
     else
         error "Python crawler execution failed"
-        return 1
     fi
+
+    if python3 "$PYTHON_SCRIPT" 0 2 2>&1 | tee -a "$LOG_FILE"; then
+        log "Python crawler executed successfully"
+    else
+        error "Python crawler execution failed"
+    fi
+
+    return 0
 }
 
 set_file_permissions() {
     log "Setting file permissions..."
-    
+
     if [ ! -d "$DATA_DIR" ]; then
         error "Data directory does not exist: $DATA_DIR"
         return 1
     fi
-    
+
     if chown -R 1000:1001 "$DATA_DIR" 2>&1 | tee -a "$LOG_FILE"; then
         log "File ownership set successfully"
     else
         error "File ownership setting failed"
         return 1
     fi
-    
+
     if chmod -R 777 "$DATA_DIR" 2>&1 | tee -a "$LOG_FILE"; then
         log "File permissions set successfully"
     else
         error "File permissions setting failed"
         return 1
     fi
+
 }
 
 cleanup() {
@@ -99,24 +115,24 @@ cleanup() {
 }
 
 main() {
-    log "=== News crawler task started ==="
-    
+    log "=== Eastmoney PYTHON_SCRIPT task started ==="
+
     if ! check_prerequisites; then
         error "Prerequisites check failed, exiting"
         exit 1
     fi
-    
+
     if ! run_python_crawler; then
-        error "Python crawler execution failed, skipping permission setting"
+        error "Python PYTHON_SCRIPT execution failed, skipping permission setting"
         exit 1
     fi
-    
+
     if ! set_file_permissions; then
         error "File permission setting failed"
         exit 1
     fi
-    
-    log "=== News crawler task completed ==="
+
+    log "=== Eastmoney crawler task completed ==="
 }
 
 trap 'error "Script interrupted"; cleanup; exit 1' INT TERM

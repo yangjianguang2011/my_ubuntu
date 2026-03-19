@@ -172,7 +172,8 @@ function loadIndexRanking() {
     // 显示加载状态
     $('#index-ranking-container').html('<div class="loading">正在加载指数排名数据...</div>');
 
-    $.get(`/api/index/ranking?top_n=${actualTopN}&period=${period}`, function(response) {
+    // 使用增强的API端点，包含估值数据
+    $.get(`/api/index/enhanced_ranking?top_n=${actualTopN}&period=${period}`, function(response) {
         if (response.success) {
             const data = response.data;
             //let rankingData = [...data.top_gainers];
@@ -224,15 +225,15 @@ function renderIndexRankingTable(data) {
 // 初始化指数排名表格
 function initIndexRankingTable(data) {
     const container = document.getElementById('index-ranking-table-container');
-    
+
     const columns = [
-        {title: "排名", field: "rank", width: 60, headerSort: true, 
+        {title: "排名", field: "rank", width: 60, headerSort: true,
             formatter: "rownum",
             hozAlign: "center"
         },
         {title: "代码", field: "symbol", width: 100, headerSort: true},
         {title: "名称", field: "name", width: 120, headerSort: true},
-        {title: "当前价格", field: "current_price", width: 100, headerSort: true, 
+        {title: "当前价格", field: "current_price", width: 100, headerSort: true,
             sorter: "number",
             formatter: function(cell, formatterParams, onRendered) {
                 const value = cell.getValue();
@@ -240,7 +241,7 @@ function initIndexRankingTable(data) {
                 return !isNaN(numValue) ? numValue.toFixed(2) : 'N/A';
             }
         },
-        {title: "涨跌额", field: "change_amount", width: 100, headerSort: true, 
+        {title: "涨跌额", field: "change_amount", width: 100, headerSort: true,
             sorter: "number",
             formatter: function(cell, formatterParams, onRendered) {
                 const value = cell.getValue();
@@ -251,7 +252,7 @@ function initIndexRankingTable(data) {
                 return displayValue;
             }
         },
-        {title: "涨跌幅(%)", field: "change_percent", width: 100, headerSort: true, 
+        {title: "涨跌幅(%)", field: "change_percent", width: 100, headerSort: true,
             sorter: "number",
             formatter: function(cell, formatterParams, onRendered) {
                 const value = cell.getValue();
@@ -260,6 +261,95 @@ function initIndexRankingTable(data) {
                 const changePercentColor = !isNaN(numValue) && numValue >= 0 ? '#28a745' : '#dc3545';
                 cell.getElement().style.color = changePercentColor;
                 return displayValue;
+            }
+        },
+        {title: "PE", field: "pe", width: 80, headerSort: true,
+            sorter: "number",
+            formatter: function(cell, formatterParams, onRendered) {
+                const value = cell.getValue();
+                if (value === null || value === undefined || isNaN(value)) {
+                    return 'N/A';
+                }
+                return parseFloat(value).toFixed(2);
+            }
+        },
+        {title: "PB", field: "pb", width: 80, headerSort: true,
+            sorter: "number",
+            formatter: function(cell, formatterParams, onRendered) {
+                const value = cell.getValue();
+                if (value === null || value === undefined || isNaN(value)) {
+                    return 'N/A';
+                }
+                return parseFloat(value).toFixed(2);
+            }
+        },
+        {title: "PE百分位", field: "pe_percentile", width: 100, headerSort: true,
+            sorter: "number",
+            formatter: function(cell, formatterParams, onRendered) {
+                const value = cell.getValue();
+                if (value === null || value === undefined || isNaN(value)) {
+                    return 'N/A';
+                }
+                const percentile = parseFloat(value);
+                const displayValue = percentile.toFixed(2) + '%';
+                
+                // 根据百分位数设置颜色
+                let color = '#666'; // 默认灰色
+                if (percentile <= 20) {
+                    color = '#28a745'; // 绿色 - 低估
+                } else if (percentile >= 80) {
+                    color = '#dc3545'; // 红色 - 高估
+                } else {
+                    color = '#ffc107'; // 黄色 - 合理
+                }
+                
+                cell.getElement().style.color = color;
+                return displayValue;
+            }
+        },
+        {title: "PB百分位", field: "pb_percentile", width: 100, headerSort: true,
+            sorter: "number",
+            formatter: function(cell, formatterParams, onRendered) {
+                const value = cell.getValue();
+                if (value === null || value === undefined || isNaN(value)) {
+                    return 'N/A';
+                }
+                const percentile = parseFloat(value);
+                const displayValue = percentile.toFixed(2) + '%';
+                
+                // 根据百分位数设置颜色
+                let color = '#666'; // 默认灰色
+                if (percentile <= 20) {
+                    color = '#28a745'; // 绿色 - 低估
+                } else if (percentile >= 80) {
+                    color = '#dc3545'; // 红色 - 高估
+                } else {
+                    color = '#ffc107'; // 黄色 - 合理
+                }
+                
+                cell.getElement().style.color = color;
+                return displayValue;
+            }
+        },
+        {title: "估值状态", field: "valuation_status", width: 100, headerSort: true,
+            formatter: function(cell, formatterParams, onRendered) {
+                const value = cell.getValue();
+                if (!value || value === '数据不足') {
+                    return 'N/A';
+                }
+                
+                // 根据估值状态设置颜色
+                let color = '#666'; // 默认灰色
+                if (value === '低估') {
+                    color = '#28a745'; // 绿色
+                } else if (value === '高估') {
+                    color = '#dc3545'; // 红色
+                } else if (value === '合理') {
+                    color = '#ffc107'; // 黄色
+                }
+                
+                cell.getElement().style.color = color;
+                return value;
             }
         }
     ];

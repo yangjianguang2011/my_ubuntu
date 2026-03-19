@@ -7,11 +7,21 @@ services:
       dockerfile: Dockerfile
     container_name: my_ubuntu
     ports:
-      - "4400:80"    # Nginx web服务端口
-      - "4401:5001"  # 股票监控应用端口(如果stock_monitor应用需要)
-      - "4422:4422"    # SSH remote access port (映射到主机的4422端口)
+      - "4400:80"      # Nginx Web 服务
+      - "4401:5001"    # Stock Monitor Web 界面
+      - "4422:4422"    # SSH 远程访问
     volumes:
-      - /vol1/1000/docker/my-ubuntu/run:/data  # 数据卷挂载
-      - /vol1/1009/paddle_mount:/paddle  # 数据卷挂载
-    restart: always
-    privileged: true  # 由于容器内需要运行cron等系统服务，可能需要特权模式
+      - /vol1/1000/docker/my-ubuntu/run:/data           # 数据卷
+      - /vol1/1009/paddle_mount:/paddle                 # PaddleOCR 模型
+    restart: unless-stopped
+    privileged: false
+    environment:
+      - TZ=Asia/Shanghai
+      - LOG_LEVEL=INFO
+      - PYTHONPATH=/root/crawlers/spiders:/root
+    networks:
+      - my_network
+
+networks:
+  my_network:
+    driver: bridge

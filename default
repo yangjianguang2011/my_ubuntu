@@ -64,8 +64,18 @@ server {
 		#index index.html index.htm;
 	}
 
-	location /stocks/ {
-		alias /data/stock_monitor/;
+	location /xueqiu/ {
+		alias /data/xueqiu_data/;
+		autoindex on;
+		autoindex_exact_size off;
+		autoindex_localtime on;
+		charset utf-8;
+		#try_files $uri $uri/ =404;
+		#index index.html index.htm;
+	}
+
+	location /eastmoney/ {
+		alias /data/analyst_data/;
 		autoindex on;
 		autoindex_exact_size off;
 		autoindex_localtime on;

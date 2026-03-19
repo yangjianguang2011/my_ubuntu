@@ -1,17 +1,16 @@
-############### eastmoney scraler
+############### 数据采集 ###############
+# 东方财富爬虫
 beautifulsoup4
 certifi
 easyutils
 et_xmlfile
 lxml
-pandas==2.1.4
 selenium
-#################
+
+############### 核心依赖 ###############
 pandas==2.1.4
 flask==2.3.3
 python-dotenv==1.0.0
 openpyxl==3.1.2
 easyquotation==0.7.7
 akshare==1.18.3
-google-ai-generativelanguage==0.6.4
-google.generativeai

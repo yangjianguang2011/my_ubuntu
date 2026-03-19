@@ -119,8 +119,8 @@ function createStockItem(stock, isNotificationEnabled) {
                 <strong>${stock.name}</strong> (${stock.code})
                 <span class="clock-direction" id="clock-${stock.code}" title="加载中...">⏳</span>
                 <span class="current-data" id="current-data-${stock.code}"></span><br>
-                低价报警: ${stock.low_alert_price || '无'} | 高价报警: ${stock.high_alert_price || '无'} | 涨跌停报警: ${stock.limit_alert ? '开启' : '关闭'}<br>
-                关键价位报警: ${formatAlertsDisplay(stock.key_price_alerts, 'price')} | 涨跌幅报警: ${formatAlertsDisplay(stock.change_pct_alerts, 'pct')}
+                低价报警: ${stock.low_alert_price || '无'} | 高价报警: ${stock.high_alert_price || '无'} | 涨跌停报警: ${stock.limit_alert ? '开启' : '关闭'} | 关键价位: ${formatAlertsDisplay(stock.key_price_alerts, 'price')} | 涨跌幅: ${formatAlertsDisplay(stock.change_pct_alerts, 'pct')}<br>
+                <span class="clock-detail" id="clock-detail-${stock.code}" style="color: #666; font-size: 13px;"></span>
             </div>
             <div class="stock-actions">
                 <button id="toggle-stock-${stock.code}" class="toggle-btn ${isNotificationEnabled ? 'toggle-on' : 'toggle-off'}">${isNotificationEnabled ? '关闭消息' : '开启消息'}</button>
@@ -2047,15 +2047,21 @@ async function fetchClockDirection(code) {
             if (clockElement) {
                 clockElement.className = `clock-direction ${clockInfo.class}`;
                 clockElement.textContent = clockInfo.icon;
-                
+
                 // 构建详细的 title 提示：几点钟方向（均线排列状态，健康度得分，密集成交区状态）
                 const maAlignment = trendAnalysis.status || '未知';
                 const healthScore = trendAnalysis.health_score || 0;
                 const consolidationStatus = trendAnalysis.consolidation?.status || '非密集成交区';
                 const isConsolidationZone = trendAnalysis.consolidation?.is_zone ? '是' : '非';
-                
+
                 // 格式：三点钟方向（均线多头排列，95 分，非密集成交区）
                 clockElement.title = `${trendDirection}（${maAlignment}，${healthScore}分，${isConsolidationZone === '是' ? '密集成交区' : '非密集成交区'}）`;
+                // 同时更新时钟详细信息行
+                const clockDetailElement = document.getElementById(`clock-detail-${code}`);
+                if (clockDetailElement) {
+                    clockDetailElement.textContent = `${trendDirection}（${maAlignment}，${healthScore}分，${isConsolidationZone === '是' ? '密集成交区' : '非密集成交区'}）`;
+                    clockDetailElement.title = clockElement.title;
+                }
             }
         }
     } catch (error) {
