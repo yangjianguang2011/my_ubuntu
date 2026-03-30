@@ -1,24 +1,26 @@
 version: '3.8'
 
 services:
-  my_ubuntu:
+  ubuntu_openclaw:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: my_ubuntu
+    container_name: ubuntu_openclaw
     ports:
       - "4400:80"      # Nginx Web 服务
       - "4401:5001"    # Stock Monitor Web 界面
       - "4422:4422"    # SSH 远程访问
+      - "38789:38789"
     volumes:
       - /vol1/1000/docker/my-ubuntu/run:/data           # 数据卷
       - /vol1/1009/paddle_mount:/paddle                 # PaddleOCR 模型
+      - /vol1/1000/docker/openclaw:/root/.openclaw
     restart: unless-stopped
-    privileged: false
+    privileged: true                                     # systemd 容器需要 privileged
     environment:
       - TZ=Asia/Shanghai
       - LOG_LEVEL=INFO
-      - PYTHONPATH=/root/crawlers/spiders:/root
+      - PYTHONPATH=/root/apps/crawlers/xueqiu:/root/apps/crawlers/eastmoney:/root/apps
     networks:
       - my_network
 

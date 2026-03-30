@@ -1,0 +1,46 @@
+[mount_point]
+/data = /data
+
+[paths]
+root_dir = /root/apps
+data_dir = /data
+log_dir = /var/log
+
+[iptv]
+work_dir = /root/apps/iptv
+iptv_data_dir = /data/iptv_data
+
+[news]
+work_dir = /root/apps/news
+news_data_dir = /data/news_data
+
+[crawlers]
+xueqiu_dir = /root/apps/crawlers/xueqiu
+eastmoney_dir = /root/apps/crawlers/eastmoney
+xueqiu_data_dir = /data/xueqiu_data
+analyst_data_dir = /data/analyst_data
+
+[stock_monitor]
+stock_monitor_dir = /root/apps/stock_monitor
+stock_monitor_data_dir = /data/stock_monitor_data
+database_dir = /data/stock_monitor_data/database
+settings_file = /data/stock_monitor_data/settings.json
+stocks_file = /data/stock_monitor_data/stocks.json
+
+[web_app]
+web_template_dir = /root/apps/stock_monitor/web_templates
+web_static_dir = /root/apps/stock_monitor/web_static
+
+[messaging]
+; 消息推送服务配置 - 请修改为您的实际配置
+message_server = https://your-message-server.example.com
+message_username = your_username
+message_token = your_token
+message_channel = wechat
+
+[cache]
+stock_cache_timeout = 180
+industry_cache_timeout = 86400
+analyst_cache_timeout = 86400
+index_cache_timeout = 86400
+fund_cache_timeout = 86400

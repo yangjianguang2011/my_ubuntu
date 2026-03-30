@@ -25,8 +25,6 @@
 ### 运行所有测试
 
 ```bash
-cd /home/jgyang/.openclaw/workspace/my-ubuntu
-
 # 运行单个测试
 python3 tests/test_cache_sync.py
 
@@ -102,5 +100,5 @@ tests/
 
 ---
 
-**最后更新**: 2026-03-15  
+**最后更新**: 2026-03-15
 **维护人**: icode

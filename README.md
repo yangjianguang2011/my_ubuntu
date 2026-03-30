@@ -10,30 +10,50 @@
 my-ubuntu/
 ├── 📄 Dockerfile              # Docker 镜像构建
 ├── 📄 docker-compose.yml      # Docker Compose 配置
-├── 📄 nginx.conf              # Nginx 配置文件
-├── 📄 default                 # Nginx 站点配置
+├── 📄 start_container.sh      # 容器启动脚本
 ├── 📄 README.md               # 项目说明
 │
-├── 📁 crawlers/               # 🕷️ 爬虫模块（独立）
-│   ├── 📁 spiders/            # 股票爬虫
-│   │   ├── xueqiu_scraper.py      # 雪球大 V 文章抓取
-│   │   ├── eastmoney_analyst.py   # 东方财富分析师数据
-│   │   └── generate_html_reports.py # HTML 报告生成
+├── 📁 apps/                   # 📦 应用模块目录
+│   ├── 📄 config.ini          # 应用配置文件
+│   ├── 📄 config.py           # Python 配置模块
+│   ├── 📄 config.sh           # Shell 配置脚本
+│   │
+│   ├── 📁 crawlers/           # 🕷️ 爬虫模块
+│   │   ├── 📁 xueqiu/         # 雪球爬虫项目
+│   │   │   ├── xueqiu_scraper.py
+│   │   │   ├── xueqiu_utils.py
+│   │   │   └── run_xueqiu.sh
+│   │   │
+│   │   ├── 📁 eastmoney/      # 东方财富爬虫项目
+│   │   │   ├── eastmoney_analyst.py
+│   │   │   └── run_eastmoney.sh
+│   │   │
+│   │   └── 📄 README.md
+│   │
 │   ├── 📁 iptv/               # IPTV 频道管理
-│   └── 📁 news/               # 新闻爬虫
+│   │   └── download_m3u.py    # M3U 播放列表下载
+│   │
+│   ├── 📁 news/               # 新闻爬虫
+│   │   └── crawl_save_news.py # 新闻数据爬取
+│   │
+│   └── 📁 stock_monitor/      # 📈 股票监控系统（主项目）
+│       ├── 📁 data_fetchers/  # 数据获取模块
+│       ├── 📁 analyzers/      # 分析模块
+│       ├── 📁 utils/          # 工具模块
+│       ├── 📁 scripts/        # 辅助脚本
+│       ├── 📁 web_templates/  # Web 模板
+│       ├── 📁 web_static/     # 静态资源
+│       └── start_app.py       # Web 应用入口
 │
-├── 📁 stock_monitor/          # 📈 股票监控系统（主项目）
-│   ├── 📁 data_fetchers/      # 数据获取模块
-│   ├── 📁 analyzers/          # 分析模块
-│   ├── 📁 utils/              # 工具模块
-│   ├── 📁 scripts/            # 辅助脚本
-│   ├── 📁 config/             # 配置文件
-│   ├── web_app.py             # Web 应用入口
-│   └── stock_monitor.py       # 监控引擎
+├── 📁 configs/                # ⚙️ 系统配置目录
+│   ├── 📄 nginx.conf          # Nginx 配置文件
+│   ├── 📄 default             # Nginx 站点配置
+│   ├── 📄 default.conf        # Nginx 默认配置
+│   └── 📄 supervisord.conf    # Supervisor 配置
 │
-├── 📁 tests/                  # 🧪 测试用例
 ├── 📁 docs/                   # 📚 文档中心
-└── 📁 run/                    # 运行时目录
+├── 📁 tests/                  # 🧪 测试用例
+└── 📁 run/                    # 运行时目录（容器挂载为 /data）
 ```
 
 ---
@@ -42,24 +62,41 @@ my-ubuntu/
 
 ### 1. Crawlers - 爬虫模块
 
-**位置**: `crawlers/`
+**位置**: `apps/crawlers/`
 
 独立的爬虫模块，与 stock_monitor 解耦。
 
-**功能**:
-- ✅ 雪球大 V 文章抓取
-- ✅ 东方财富分析师数据采集
-- ✅ HTML 报告自动生成
-- ✅ IPTV 频道下载管理
-- ✅ 新闻爬虫
+**子模块**:
+- **xueqiu/** - 雪球大 V 文章抓取
+- **eastmoney/** - 东方财富分析师数据采集
 
-**文档**: [crawlers/README.md](crawlers/README.md)
+**文档**: [apps/crawlers/README.md](apps/crawlers/README.md)
 
 ---
 
-### 2. Stock Monitor - 股票监控系统
+### 2. IPTV - IPTV 频道管理
 
-**位置**: `stock_monitor/`
+**位置**: `apps/iptv/`
+
+IPTV 播放列表下载和管理。
+
+**功能**:
+- ✅ M3U 播放列表下载
+- ✅ 频道检查过滤
+
+---
+
+### 3. News - 新闻爬虫
+
+**位置**: `apps/news/`
+
+新闻数据爬取和存储。
+
+---
+
+### 4. Stock Monitor - 股票监控系统
+
+**位置**: `apps/stock_monitor/`
 
 主项目，提供股票监控、数据分析、报警通知等功能。
 
@@ -71,27 +108,7 @@ my-ubuntu/
 - ✅ Web 管理界面
 - ✅ 多渠道通知推送
 
-**文档**: [stock_monitor/README.md](stock_monitor/README.md)
-
----
-
-### 3. Tests - 测试用例
-
-**位置**: `tests/`
-
-包含所有模块的测试用例。
-
-**文档**: [tests/README.md](tests/README.md)
-
----
-
-### 4. Docs - 文档中心
-
-**位置**: `docs/`
-
-包含项目分析报告、技术文档等。
-
-**文档**: [docs/README.md](docs/README.md)
+**文档**: [apps/stock_monitor/README.md](apps/stock_monitor/README.md)
 
 ---
 
@@ -116,32 +133,29 @@ docker-compose down
 
 ```bash
 # 雪球爬虫
-cd crawlers/spiders
+cd apps/crawlers/xueqiu
 bash run_xueqiu.sh
 
 # 东方财富爬虫
-cd crawlers/spiders
+cd apps/crawlers/eastmoney
 bash run_eastmoney.sh
 
 # IPTV
-cd crawlers/iptv
+cd apps/iptv
 python3 download_m3u.py
 
 # 新闻爬虫
-cd crawlers/news
+cd apps/news
 bash run.sh
 ```
 
 #### 运行股票监控
 
 ```bash
-cd stock_monitor
+cd apps/stock_monitor
 
 # Web 界面
-python3 web_app.py
-
-# 仅监控
-python3 stock_monitor.py
+python3 start_app.py
 ```
 
 ---
@@ -152,11 +166,10 @@ python3 stock_monitor.py
 
 | 时间 | 任务 | 模块 |
 |------|------|------|
-| 每天 01:00 | 股票监控检查 | stock_monitor |
-| 每天 05:00 | 雪球爬虫 | crawlers/spiders |
-| 每天 23:00 | IPTV 频道下载 | crawlers/iptv |
-| 每天 23:00 | 东方财富分析师 | crawlers/spiders |
-| 每 8 小时 | 新闻爬虫 | crawlers/news |
+| 每 8 小时 | 新闻爬虫 | apps/news |
+| 每天 23:05 | IPTV 频道下载 | apps/iptv |
+| 每天 23:10 | 雪球爬虫 | apps/crawlers/xueqiu |
+| 每天 23:40 | 东方财富分析师 | apps/crawlers/eastmoney |
 
 ---
 
@@ -167,6 +180,7 @@ python3 stock_monitor.py
 | 4400 | Nginx Web | 静态资源/报告 |
 | 4401 | Stock Monitor | 股票监控 Web 界面 |
 | 4422 | SSH | 远程管理 |
+| 38789 | OpenClaw | 浏览器自动化 |
 
 ---
 
@@ -192,9 +206,8 @@ python3 stock_monitor.py
 - [清理报告](docs/CLEANUP_REPORT.md)
 
 ### 模块文档
-- [Crawlers 说明](crawlers/README.md)
-- [Stock Monitor 说明](stock_monitor/README.md)
-- [测试用例说明](tests/README.md)
+- [Crawlers 说明](apps/crawlers/README.md)
+- [Stock Monitor 说明](apps/stock_monitor/README.md)
 
 ---
 
@@ -204,10 +217,10 @@ python3 stock_monitor.py
 
 ```bash
 # 进入容器
-docker exec -it my_ubuntu bash
+docker exec -it ubuntu_openclaw bash
 
 # 更新代码
-cd /root/stock_monitor
+cd /root/apps/stock_monitor
 git pull
 
 # 重启服务
@@ -218,20 +231,20 @@ docker-compose restart
 
 ```bash
 # 应用日志
-docker exec my_ubuntu tail -f /var/log/stock_monitor.log
+docker exec ubuntu_openclaw tail -f /var/log/stock_monitor/log.txt
 
 # 爬虫日志
-docker exec my_ubuntu tail -f /var/log/cron.log
+docker exec ubuntu_openclaw tail -f /var/log/cron/news.log
 ```
 
 ### 备份数据
 
 ```bash
 # 备份配置
-docker cp my_ubuntu:/root/stock_monitor/config ./backup/
+docker cp ubuntu_openclaw:/root/apps/config.ini ./backup/
 
 # 备份数据
-docker cp my_ubuntu:/data ./backup/
+docker cp ubuntu_openclaw:/data ./backup/
 ```
 
 ---
@@ -263,10 +276,10 @@ See [LICENSE](LICENSE) for details.
 
 ## 📞 联系方式
 
-- 项目路径：`/home/jgyang/.openclaw/workspace/my-ubuntu`
-- 容器名称：`my_ubuntu`
+- 项目路径：`e:\work\code\my_ubuntu`
+- 容器名称：`ubuntu_openclaw`
 
 ---
 
-**最后更新**: 2026-03-15  
+**最后更新**: 2026-03-30
 **维护人**: icode

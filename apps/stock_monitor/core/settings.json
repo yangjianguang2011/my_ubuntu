@@ -1,0 +1,7 @@
+{
+  "check_interval": 180,
+  "global_notification_enabled": true,
+  "industry_page_enabled": true,
+  "market_open_start": "09:30",
+  "market_open_end": "16:00"
+}
