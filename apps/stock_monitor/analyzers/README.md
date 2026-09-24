@@ -8,9 +8,8 @@
 
 | 文件 | 功能 | 说明 |
 |------|------|------|
-| `trend_trading_analyzer.py` | 趋势交易分析 | 核心分析器 |
-| `trend_analysis_visualizer.py` | 趋势可视化 | 图表生成 |
-| `backtesting_engine.py` | 回测引擎 | 策略回测 |
+| `trend_trading_analyzer.py` | 趋势交易分析 | 核心分析器（含 K 线图表数据） |
+| `backtesting_engine.py` | 回测引擎 | 策略回测（保留备用，暂无调用方） |
 
 ---
 

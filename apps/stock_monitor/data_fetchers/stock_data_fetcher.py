@@ -61,10 +61,33 @@ def determine_market_type(stock_code):
     return normalized_code, is_hk_stock
 
 
-def get_stock_info(stock):
+# 无数据 / 格式错误时的占位结果键（这些键在各分支里重复出现）
+_EMPTY_KEYS = ("price", "change_amount", "change_pct", "turnover_rate",
+               "pe_ratio", "total_market_value", "volume")
+
+
+def _empty_info(stock_code, stock_name) -> dict:
+    """构造「无数据」占位结果。**不缓存**，以便下次重试。"""
+    info = {"stock_code": stock_code, "stock_name": stock_name}
+    info.update({k: None for k in _EMPTY_KEYS})
+    return info
+
+
+def _fetch_quotes(codes, is_hk: bool) -> dict:
+    """一次请求拉多只行情（A股走 sina、港股走 hkquote），返回 {code: 原始行情}。
+
+    easyquotation 支持批量：`stocks([code1, code2, ...])` 一次拿回全部，
+    故调用方应**按市场分组**后批量调用，而不是逐只请求。
+    """
+    quotation = easyquotation.use("hkquote" if is_hk else "sina")
+    return quotation.stocks(list(codes)) or {}
+
+
+def get_stock_info(stock, raw_quote=None):
     """
     根据股票对象获取股票信息
     :param stock: 股票对象，包含name和code字段
+    :param raw_quote: 可选的**已预取**原始行情（供批量场景复用，避免重复请求）
     :return: 包含股票信息的字典
     """
     stock_code = stock["code"]
@@ -85,46 +108,16 @@ def get_stock_info(stock):
 
         if is_hk_stock is None:
             # 格式错误的情况
-            result = {
-                "stock_code": stock_code,
-                "stock_name": stock_name,
-                "price": None,
-                "change_amount": None,
-                "change_pct": None,
-                "turnover_rate": None,
-                "pe_ratio": None,
-                "total_market_value": None,
-                "volume": None,
-            }
-            # 不缓存失败的结果，以便下次重试
-            return result
+            return _empty_info(stock_code, stock_name)
 
-        if is_hk_stock:
-            # 港股，使用hkquote接口
-            quotation = easyquotation.use("hkquote")
-            stock_data = quotation.stocks([normalized_code])
-        else:
-            # A股使用sina接口
-            quotation = easyquotation.use("sina")
-            stock_data = quotation.stocks([normalized_code])
+        if raw_quote is None:
+            raw_quote = _fetch_quotes([normalized_code], is_hk_stock).get(normalized_code)
 
-        if not stock_data or normalized_code not in stock_data:
+        if not raw_quote:
             logger.warning(f"无法获取股票 {normalized_code} 的数据")
-            result = {
-                "stock_code": normalized_code,
-                "stock_name": stock_name,
-                "price": None,
-                "change_amount": None,
-                "change_pct": None,
-                "turnover_rate": None,
-                "pe_ratio": None,
-                "total_market_value": None,
-                "volume": None,
-            }
-            # 不缓存失败的结果，以便下次重试
-            return result
+            return _empty_info(normalized_code, stock_name)
 
-        stock_info = stock_data[normalized_code]
+        stock_info = raw_quote
 
         # 初始化返回值 - 根据股票类型处理不同的数据格式
         if is_hk_stock:
@@ -220,6 +213,8 @@ def get_stock_info(stock):
                     and stock_info["low"] != "0"
                     else None
                 ),  # 最低价
+                # 注意：easyquotation(sina) 的命名反直觉 ——
+                #   `turnover` 是**成交量(股)**，`volume` 是**成交额(元)**
                 "volume": stock_info.get("turnover"),  # 成交量
                 "turnover_value": stock_info.get("volume"),  # 成交额
                 "date": stock_info.get("date"),  # 日期
@@ -255,17 +250,52 @@ def get_stock_info(stock):
     except Exception as e:
         logger.error(f"获取股票 {stock_name}({stock_code}) 详细信息时出错: {str(e)}")
         # 不缓存失败的结果，以便下次重试
-        return {
-            "stock_code": stock_code,
-            "stock_name": stock_name,
-            "price": None,
-            "change_amount": None,
-            "change_pct": None,
-            "turnover_rate": None,
-            "pe_ratio": None,
-            "total_market_value": None,
-            "volume": None,
-        }
+        return _empty_info(stock_code, stock_name)
+
+
+def get_stocks_info_batch(stocks) -> dict:
+    """**批量**获取行情：命中缓存直接用，其余按市场分组各一次请求。
+
+    返回 `{原始code: info}`。相比逐只调用 `get_stock_info`，网络请求数从 N 次降到
+    最多 2 次（A股一批 + 港股一批），且完全复用 `get_stock_info` 的解析与缓存逻辑
+    （通过预取原始行情 `raw_quote` 传入）。
+    """
+    out, pending = {}, []
+    for stock in stocks:
+        code = stock.get("code", "")
+        name = stock.get("name", "")
+        cached = get_stock_cached_data(f"stock_info_{name}_{code}")
+        if cached is not None:
+            out[code] = cached
+            continue
+        normalized_code, is_hk = determine_market_type(code)
+        if is_hk is None:
+            out[code] = _empty_info(code, name)
+            continue
+        pending.append((stock, normalized_code, is_hk))
+
+    # 按市场分组 → 每组一次批量请求
+    groups = {}
+    for stock, normalized_code, is_hk in pending:
+        groups.setdefault(is_hk, []).append((stock, normalized_code))
+
+    for is_hk, items in groups.items():
+        market = "港股" if is_hk else "A股"
+        try:
+            quotes = _fetch_quotes([c for _, c in items], is_hk)
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"批量获取{market}行情失败: {e}")
+            quotes = {}
+        for stock, normalized_code in items:
+            raw = quotes.get(normalized_code)
+            if not raw:
+                logger.warning(f"批量结果中缺少 {normalized_code}（{market}）")
+                out[stock.get("code", "")] = _empty_info(normalized_code, stock.get("name", ""))
+                continue
+            out[stock.get("code", "")] = get_stock_info(stock, raw_quote=raw)
+        logger.info(f"批量获取{market}行情：{len(items)} 只（1 次请求）")
+
+    return out
 
 
 def _fetch_historical_data(stock_code, days=365):

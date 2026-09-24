@@ -1,6 +1,16 @@
 """
-基金数据获取模块 - 优化版
-支持基金列表和基金历史数据的获取和处理
+基金（场内 ETF/LOF）数据获取模块
+
+数据源：**stockdb 本地行情为主，akshare 为兜底**（2026-09-21 切换）。
+
+切换原因：原实现用 akshare 场外开放式基金净值接口（fund_open_fund_info_em），
+其"单位净值"口径在分红型 ETF 上会跳变，导致收益率计算错误；本页全部标的都是
+场内 ETF/LOF（`SELECTED_FUND_LIST` 67 只 / `_ALL_FUND_LIST_` 184 只，stockdb 实测
+184/184 命中、510300 自 2012 年起 3480 行），故改用 stockdb 场内**前复权价格**
+（qfq ≈ 累计净值口径，与 akshare 累计净值 12M 收益平均差异 ~3pp，为 ETF 折溢价所致）。
+
+**语义列名（方案 B，统一 schema）**：`日期 / 收盘价 / 涨跌幅% / 来源`
+akshare 兜底返回的净值数据会转换到同一 schema（收盘价=单位净值，已在日期列统一）。
 """
 
 import calendar
@@ -16,6 +26,11 @@ from config import setup_logger
 
 logger = setup_logger(__name__)
 from ..core.cache_with_database import get_fund_cached_data, set_fund_cache_data
+from .stockdb_data_fetcher import get_daily, get_raw  # stockdb 日K（本机，无额度限制）
+
+# stockdb 取数的 schema：A股口径写入时统一加"净值日期/单位净值"兼容列已废弃，
+# 改为语义列；来源标记便于排查（stockdb=本地 / akshare=在线）
+_CL_DATE, _CL_CLOSE, _CL_PCT, _CL_SRC = "日期", "收盘价", "涨跌幅%", "来源"
 
 _ALL_FUND_LIST_ = [
     {"基金代码": 510310, "基金简称": "沪深300ETF"},
@@ -43,7 +58,6 @@ _ALL_FUND_LIST_ = [
     {"基金代码": 515880, "基金简称": "通信ETF"},
     {"基金代码": 159869, "基金简称": "游戏ETF"},
     {"基金代码": 515980, "基金简称": "人工智能ETF"},
-    {"基金代码": 512710, "基金简称": "军工龙头ETF"},
     {"基金代码": 159755, "基金简称": "电池ETF"},
     {"基金代码": 159851, "基金简称": "金融科技ETF"},
     {"基金代码": 515790, "基金简称": "光伏ETF"},
@@ -204,8 +218,40 @@ _ALL_FUND_LIST_ = [
     {"基金代码": 512870, "基金简称": "杭州湾区ETF"},
 ]
 
+# 大盘指数 ETF —— 与指数页「大盘指数」组一一对应（沪深300/上证50/中证500/中证1000/上证180/创业板50）。
+# 这些 ETF 在基金排名中**恒置顶**（保证不被 top_n 截断），便于与指数页对照。
+# 注：口径不同——指数页是指数点位，这里是 ETF 二级市场**前复权价格**（叠加折溢价/跟踪误差/管理费），
+# 故两者收益接近但**不相等**，属正常现象。
+INDEX_FUND_ETFS = {
+    "510300": "沪深300ETF",
+    "510050": "上证50ETF",
+    "510500": "中证500ETF",
+    "512100": "中证1000ETF",
+    "510180": "上证180ETF",
+    "159949": "创业板50ETF",
+}
+
+# 基金分组标签（与指数页的 `index_group` 同构；指数页分组依据是"有无乐咕估值源"，
+# 基金页无估值字段，故按**标的是否大盘指数 ETF** 分组）
+GROUP_INDEX_FUND = "大盘指数ETF"
+GROUP_THEME_FUND = "行业主题ETF"
+
+
+def fund_group(symbol) -> str:
+    """基金分组标签：`大盘指数ETF` / `行业主题ETF`。"""
+    return (GROUP_INDEX_FUND if str(symbol).zfill(6) in INDEX_FUND_ETFS
+            else GROUP_THEME_FUND)
+
 # 新的精选基金列表，初始为空，将在update_selected_fund_list函数中被填充
 SELECTED_FUND_LIST = [
+    # —— 大盘指数 ETF（置顶组，见 INDEX_FUND_ETFS）——
+    {"基金代码": 510300, "基金简称": "沪深300ETF"},
+    {"基金代码": 510050, "基金简称": "上证50ETF"},
+    {"基金代码": 510500, "基金简称": "中证500ETF"},
+    {"基金代码": 512100, "基金简称": "中证1000ETF"},
+    {"基金代码": 510180, "基金简称": "上证180ETF"},
+    {"基金代码": 159949, "基金简称": "创业板50ETF"},
+    # —— 行业/主题 ETF ——
     {"基金代码": 512400, "基金简称": "有色金属ETF"},
     {"基金代码": 588200, "基金简称": "科创芯片ETF"},
     {"基金代码": 517520, "基金简称": "黄金股ETF"},
@@ -220,7 +266,6 @@ SELECTED_FUND_LIST = [
     {"基金代码": 512200, "基金简称": "房地产ETF"},
     {"基金代码": 159869, "基金简称": "游戏ETF"},
     {"基金代码": 515980, "基金简称": "人工智能ETF"},
-    {"基金代码": 512710, "基金简称": "军工龙头ETF"},
     {"基金代码": 515790, "基金简称": "光伏ETF"},
     {"基金代码": 512660, "基金简称": "军工ETF"},
     {"基金代码": 561330, "基金简称": "矿业ETF"},
@@ -302,32 +347,177 @@ def _convert_cached_data_to_dataframe(
         return pd.DataFrame()
 
 
-def get_fund_list():
-    """
-    获取开放式基金列表
-    """
-    cache_key = "fund_list"
 
-    # 尝试从缓存获取数据
-    cached_data = get_fund_cached_data(cache_key)
-    if cached_data is not None:
-        # 将缓存数据转换为DataFrame格式
-        return _convert_cached_data_to_dataframe(cached_data)
 
+# ---------------------------------------------------------------- 数据层
+def _records_from_stockdb(code: str) -> Optional[List[Dict]]:
+    """stockdb 场内行情 → 统一 schema（日期/收盘价/涨跌幅%）。失败返回 None 以便兜底。"""
     try:
-        # 获取开放式基金每日净值数据
-        fund_list = ak.fund_open_fund_daily_em()
+        df = get_daily(code, fq="qfq", fields="date,close,pct_chg")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"stockdb 取数失败 {code}: {type(e).__name__}: {e}")
+        return None
+    if df is None or df.empty or "close" not in df.columns:
+        return None
+    df = df.sort_values("date")
+    return [
+        {  # 日期 int YYYYMMDD → 'YYYY-MM-DD'；qfq 前复权 ≈ 累计净值口径
+            _CL_DATE: str(int(d["date"]))[:10] if str(d["date"]).isdigit()
+                      else str(d["date"])[:10],
+            _CL_CLOSE: round(float(d["close"]), 4),
+            _CL_PCT: (None if pd.isna(d["pct_chg"]) else round(float(d["pct_chg"]), 3)),
+            _CL_SRC: "stockdb",
+        }
+        for _, d in df.iterrows()
+    ]
 
-        # 将DataFrame转换为字典列表进行缓存，避免JSON序列化问题
-        fund_list_dict = fund_list.to_dict("records") if not fund_list.empty else []
-        set_fund_cache_data(cache_key, fund_list_dict)
 
-        logger.info(f"!akshare!成功获取并缓存 {len(fund_list)} 只基金数据")
-        return fund_list
-    except Exception as e:
-        logger.error(f"获取基金列表失败: {e}")
-        # 如果获取失败，返回空DataFrame
+def _records_from_akshare(code: str) -> Optional[List[Dict]]:
+    """akshare 兜底（在线，"单位净值走势"；分红型标的口径与 qfq 有差异）。"""
+    try:
+        df = ak.fund_open_fund_info_em(symbol=code, indicator="单位净值走势")
+        if df is None or df.empty or "单位净值" not in df.columns:
+            return None
+        df = df.copy()
+        df["净值日期"] = pd.to_datetime(df["净值日期"]).dt.strftime("%Y-%m-%d")
+        df = df.sort_values("净值日期")
+        pct = df["日增长率"] if "日增长率" in df.columns else None
+        return [
+            {
+                _CL_DATE: str(r["净值日期"])[:10],
+                _CL_CLOSE: round(float(r["单位净值"]), 4),
+                _CL_PCT: (None if pct is None or pd.isna(r["日增长率"])
+                          else round(float(r["日增长率"]), 3)),
+                _CL_SRC: "akshare",
+            }
+            for _, r in df.iterrows()
+        ]
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"akshare 取数失败 {code}: {type(e).__name__}: {e}")
+        return None
+
+
+def get_fund_daily_data(fund_code: str, indicator: str = None, apply_delay: bool = False):
+    """获取单只基金完整历史（stockdb 优先，akshare 兜底），返回 DataFrame。
+
+    兼容旧签名（indicator/apply_delay 参数保留但不影响取数，stockdb 无需延时）。
+    输出列为统一 schema（日期/收盘价/涨跌幅%/来源），升序。
+    """
+    code = str(fund_code).zfill(6)
+    cache_key = f"fund_px_hist_{code}"           # 新前缀：语义切换不读旧净值缓存
+    cached = get_fund_cached_data(cache_key)
+    if cached:
+        return pd.DataFrame(cached)
+
+    records = _records_from_stockdb(code)
+    if not records:
+        records = _records_from_akshare(code)
+    if not records:
+        logger.warning(f"基金 {code} 无历史数据（stockdb/akshare 均未命中）")
         return pd.DataFrame()
+
+    df = pd.DataFrame(records).sort_values(_CL_DATE)
+    set_fund_cache_data(cache_key, df.to_dict("records"), cache_duration=86400)
+    return df
+
+
+def get_fund_history(fund_code: str, period: str = "12M", indicator: str = None,
+                     apply_delay: bool = False):
+    """获取单只基金在 period 窗口内的历史（缓存整段，按期切片）。"""
+    cache_key = f"fund_px_hist_{str(fund_code).zfill(6)}_{period}"
+    cached = get_fund_cached_data(cache_key)
+    if cached:
+        return pd.DataFrame(cached)
+
+    full = get_fund_daily_data(fund_code)
+    if full.empty:
+        return pd.DataFrame()
+
+    hist = filter_history_by_period(full, period).reset_index(drop=True)
+    set_fund_cache_data(cache_key, hist.to_dict("records"), cache_duration=86400)
+    return hist
+
+
+def get_fund_histories_smart_batch(fund_codes: List[str], period: str = "12M",
+                                   indicator: str = None, delay: float = 0.0):
+    """批量获取多只基金的历史（stockdb **一次请求拉多只**，仅对未命中缓存的个股兜底）。
+
+    兼容旧签名（indicator/delay 保留；stockdb 本地取数无网络翻页，不再需要延时）。
+    流程：逐码查缓存 → 缺失码一次 get_raw 拉全 → 逐码写缓存（整段+切片）→
+    stockdb 未命中的码走 akshare 兜底（get_fund_history 内部）。
+    """
+    results: Dict[str, pd.DataFrame] = {}
+    codes = [str(c).zfill(6) for c in fund_codes]
+    missing: List[str] = []
+    for code in codes:
+        cache_key = f"fund_px_hist_{code}_{period}"
+        cached = get_fund_cached_data(cache_key)
+        if cached is not None:
+            results[code] = _convert_cached_data_to_dataframe(cached)
+        else:
+            missing.append(code)
+
+    if missing:
+        try:
+            df = get_raw(missing, fq="qfq", fields="date,code,close,pct_chg")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"stockdb 批量取数失败: {type(e).__name__}: {e}")
+            df = None
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            for code, g in df.groupby("code"):
+                g = g.sort_values("date")
+                full = pd.DataFrame([
+                    {"日期": str(int(r["date"]))[:10],
+                     "收盘价": round(float(r["close"]), 4),
+                     "涨跌幅%": (None if pd.isna(r["pct_chg"])
+                                 else round(float(r["pct_chg"]), 3)),
+                     "来源": "stockdb"}
+                    for _, r in g.iterrows()
+                ])
+                set_fund_cache_data(f"fund_px_hist_{code}",
+                                    full.to_dict("records"), cache_duration=86400)
+                hist = filter_history_by_period(full, period).reset_index(drop=True)
+                set_fund_cache_data(f"fund_px_hist_{code}_{period}",
+                                    hist.to_dict("records"), cache_duration=86400)
+                results[code] = hist
+
+    # stockdb 未命中的（代码缺失/新上市）走 akshare 逐只兜底
+    still_missing = [c for c in codes if c not in results
+                     or results[c] is None or (hasattr(results[c], "empty")
+                                               and getattr(results[c], "empty", True))]
+    for code in missing:
+        if code in results and not (getattr(results[code], "empty", True)):
+            continue
+        results[code] = get_fund_history(code, period=period)
+    got = sum(1 for v in results.values() if not getattr(v, "empty", True))
+    logger.info(f"批量获取基金数据完成（stockdb）：{len(codes)} 只，"
+                f"批量请求 {len(missing)} 次兜底 {len(missing)}, 有效 {got} 只")
+    return results
+
+
+def _period_return(history) -> Optional[Dict]:
+    """由统一 schema（日期/收盘价）的历史记录计算期间收益率。
+
+    返回 {rate(%), current(最新价), amount(绝对涨跌), days(条数)}；数据不足返回 None。
+    收益率 = 尾价/首价 − 1（qfq 前复权 ≈ 累计净值口径，分红已含）。
+    """
+    recs = _ensure_consistent_format(history)
+    if len(recs) < 2:
+        return None
+    vals = [r.get(_CL_CLOSE) for r in recs
+            if isinstance(r, dict) and r.get(_CL_CLOSE) is not None]
+    try:
+        vals = [float(v) for v in vals if v not in (None, "",)]
+    except (TypeError, ValueError):
+        return None
+    if len(vals) < 2 or vals[0] == 0:
+        return None
+    return {
+        "rate": round((vals[-1] / vals[0] - 1.0) * 100, 2),
+        "current": round(vals[-1], 4),
+        "amount": round(vals[-1] - vals[0], 4),
+        "days": len(recs),
+    }
 
 
 def calculate_date_range(period: str):
@@ -375,200 +565,58 @@ def calculate_date_range(period: str):
     return start_date, end_date
 
 
-def filter_fund_history_by_period(fund_history_df: pd.DataFrame, period: str = "12M"):
-    """
-    根据时间段筛选基金历史数据
-    :param fund_history_df: 基金历史数据DataFrame
-    :param period: 时间周期，如 "1M", "3M", "6M", "12M", "YTD", "1Y" 等
-    """
-    if fund_history_df.empty or "净值日期" not in fund_history_df.columns:
-        return fund_history_df
+def filter_history_by_period(history_df: pd.DataFrame, period: str = "12M"):
+    """按时间段筛选历史数据（统一 schema：日期/收盘价）。"""
+    if history_df is None or history_df.empty or "日期" not in history_df.columns:
+        return history_df
 
-    # 转换日期列为datetime类型
-    fund_history_df["净值日期"] = pd.to_datetime(fund_history_df["净值日期"])
-
-    # 计算时间范围
+    df = history_df.copy()
+    df["日期"] = pd.to_datetime(df["日期"])
     start_date, end_date = calculate_date_range(period)
-
-    # 筛选指定时间范围内的数据
-    filtered_df = fund_history_df[
-        (fund_history_df["净值日期"] >= start_date)
-        & (fund_history_df["净值日期"] <= end_date)
-    ]
-    filtered_df = filtered_df.sort_values("净值日期")
-
-    # 将日期转换回字符串格式
-    filtered_df["净值日期"] = filtered_df["净值日期"].dt.strftime("%Y-%m-%d")
-
-    return filtered_df
+    df = df[(df["日期"] >= start_date) & (df["日期"] <= end_date)].sort_values("日期")
+    df["日期"] = df["日期"].dt.strftime("%Y-%m-%d")
+    return df
 
 
-def get_fund_daily_data(
-    fund_code: str, indicator: str = "单位净值走势", apply_delay=True
-):
-    """
-    获取基金完整历史数据并缓存
-    :param fund_code: 基金代码
-    :param indicator: 指标类型，默认为"单位净值走势"
-    :param apply_delay: 是否应用延时，默认为True
-    """
-    cache_key = f"full_fund_history_{fund_code}_{indicator}"
-    cached_data = get_fund_cached_data(cache_key)
-    if cached_data is not None:
-        # 将缓存数据转换为DataFrame格式
-        return _convert_cached_data_to_dataframe(cached_data)
-
-    # 只有在缓存未命中，需要实际调用接口时才添加延时
-    if apply_delay:
-        time_module.sleep(0.5)  # 0.5秒延时
-
-    try:
-        # 获取基金历史净值数据
-        fund_history = ak.fund_open_fund_info_em(symbol=fund_code, indicator=indicator)
-        if fund_history.empty:
-            fund_history = ak.fund_open_fund_info_em(
-                symbol=fund_code, indicator="累计净值走势"
-            )
-        if fund_history.empty:
-            fund_history = ak.fund_open_fund_info_em(
-                symbol=fund_code, indicator="累计收益率走势"
-            )
-        if fund_history.empty:
-            fund_history = ak.fund_open_fund_info_em(
-                symbol=fund_code, indicator="单位净值"
-            )
-
-        if fund_history.empty:
-            logger.warning(f"基金 {fund_code} 的历史数据为空")
-            return pd.DataFrame()
-
-        # 确保日期列是datetime类型并转换为字符串格式，避免JSON序列化问题
-        if "净值日期" in fund_history.columns:
-            fund_history["净值日期"] = pd.to_datetime(
-                fund_history["净值日期"]
-            ).dt.strftime("%Y-%m-%d")
-            fund_history = fund_history.sort_values("净值日期")
-
-        # 将DataFrame转换为字典列表进行缓存，避免JSON序列化问题
-        fund_history_dict = fund_history.to_dict("records")
-        set_fund_cache_data(cache_key, fund_history_dict, cache_duration=86400)
-        logger.info(
-            f"!akshare!成功获取并缓存基金 {fund_code} 的历史数据，共 {len(fund_history)} 条记录"
-        )
-        return fund_history
-    except Exception as e:
-        logger.error(f"获取基金历史数据失败 {fund_code}: {e}")
-        return pd.DataFrame()
-
-
-def get_fund_history(
-    fund_code: str,
-    period: str = "12M",
-    indicator: str = "单位净值走势",
-    apply_delay=True,
-):
-    """
-    获取单个基金历史数据
-    :param fund_code: 基金代码
-    :param period: 时间周期，默认12个月
-    :param indicator: 指标类型，默认为"单位净值走势"
-    :param apply_delay: 是否应用延时，默认为True
-    """
-    cache_key = f"fund_history_{fund_code}_{period}_{indicator}"
-
-    # 尝试从缓存获取数据
-    cached_data = get_fund_cached_data(cache_key)
-    if cached_data is not None:
-        # 将缓存数据转换为DataFrame格式
-        return _convert_cached_data_to_dataframe(cached_data)
-
-    # 只有在缓存未命中，需要调用get_fund_daily_data时才添加延时
-    if apply_delay:
-        time_module.sleep(0.3)  # 0.3秒延时
-
-    try:
-        # 获取基金历史净值数据
-        fund_history = get_fund_daily_data(
-            fund_code, indicator=indicator, apply_delay=False
-        )  # 不在内部添加延时
-        if not fund_history.empty:
-            fund_history = filter_fund_history_by_period(fund_history, period)
-            fund_history_dict = fund_history.to_dict("records")
-            set_fund_cache_data(
-                cache_key, fund_history_dict, cache_duration=86400
-            )  # 缓存1天
-            return fund_history
-        else:
-            logger.warning(f"基金 {fund_code} 的历史数据为空")
-            return pd.DataFrame()
-    except Exception as e:
-        logger.error(f"获取基金历史数据失败 {fund_code}: {e}")
-        return pd.DataFrame()
-
-
-def get_fund_histories_smart_batch(
-    fund_codes: List[str],
-    period: str = "12M",
-    indicator: str = "单位净值走势",
-    delay: float = 0.5,
-):
-    """
-    智能批量获取多个基金的历史数据，只对需要调用接口的数据添加延时
-    :param fund_codes: 基金代码列表
-    :param period: 时间周期，默认12个月
-    :param indicator: 指标类型，默认为"单位净值走势"
-    :param delay: 请求之间的延时（秒）
-    """
-    results = {}
-    api_calls_made = 0  # 统计实际调用接口的次数
-
-    for fund_code in fund_codes:
-        # 检查缓存
-        cache_key = f"fund_history_{fund_code}_{period}_{indicator}"
-        cached_data = get_fund_cached_data(cache_key)
-
-        if cached_data is not None:
-            # 缓存命中，不需要延时
-            results[fund_code] = _convert_cached_data_to_dataframe(cached_data)
-        else:
-            # 缓存未命中，需要调用接口，添加延时
-            if api_calls_made > 0 and delay > 0:
-                time_module.sleep(delay)
-
-            history = get_fund_history(
-                fund_code, period=period, indicator=indicator, apply_delay=False
-            )  # 不在内部添加延时
-            results[fund_code] = history
-            api_calls_made += 1
-
-    logger.info(
-        f"批量获取基金数据完成，共处理 {len(fund_codes)} 只基金，实际调用接口 {api_calls_made} 次"
-    )
-    return results
+def filter_fund_history_by_period(history_df: pd.DataFrame, period: str = "12M"):
+    """兼容旧名的切片函数（预热器 start_app 等使用）。"""
+    return filter_history_by_period(history_df, period)
 
 
 def _selected_list2_dataframe():
     """
-    将selected_funds列表转换为与get_fund_list返回格式兼容的DataFrame
+    将精选基金列表转为 DataFrame：代码/名称 + stockdb 实时快照（收盘价/涨跌幅%）。
+
+    前端 `/api/fund/list` 只消费 基金代码/基金简称（chart 选择器），
+    其余字段为真实市值信息（原 akshare 版本这些字段全是硬编码假值）。
     """
+    codes = [str(f["基金代码"]).zfill(6) for f in SELECTED_FUND_LIST]
+    quotes: Dict[str, dict] = {}
+    try:
+        df = get_raw(codes, fq="qfq", fields="date,code,close,pct_chg")
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            for code, g in df.groupby("code"):
+                g = g.sort_values("date")
+                last = g.iloc[-1]
+                quotes[code] = {
+                    "收盘价": round(float(last["close"]), 4),
+                    "涨跌幅%": (None if pd.isna(last["pct_chg"])
+                                else round(float(last["pct_chg"]), 3)),
+                }
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"精选列表快照获取失败（stockdb）: {e}")
+
     fund_list = []
     for fund in SELECTED_FUND_LIST:
-        fund_info = {
-            "基金代码": str(fund["基金代码"]).zfill(6),
+        code = str(fund["基金代码"]).zfill(6)
+        q = quotes.get(code, {})
+        fund_list.append({
+            "基金代码": code,
             "基金简称": fund["基金简称"],
-            # 添加其他必需字段，使用默认值
-            "2026-01-28-单位净值": None,
-            "2026-01-28-累计净值": None,
-            "2026-01-27-单位净值": None,
-            "2026-01-27-累计净值": None,
-            "日增长值": None,
-            "日增长率": None,
-            "申购状态": "开放申购",  # 默认状态
-            "赎回状态": "开放赎回",  # 默认状态
-            "手续费": 0.002,  # 默认手续费
-        }
-        fund_list.append(fund_info)
-
+            "收盘价": q.get("收盘价"),
+            "涨跌幅%": q.get("涨跌幅%"),
+            "fund_group": fund_group(code),
+        })
     return pd.DataFrame(fund_list)
 
 
@@ -589,6 +637,18 @@ def get_selected_fund_list():
         return []
 
 
+def _pin_index_funds(ranked: List[Dict]) -> List[Dict]:
+    """给每项打 `fund_group` 标签，并把大盘指数 ETF 置顶（其余保持原顺序）。
+
+    置顶 = 保证不被 `top_n` 截断；前端按 `fund_group` **分组显示**（与指数页同构）。
+    """
+    for item in ranked:
+        item["fund_group"] = fund_group(item.get("symbol", ""))
+    idx = [x for x in ranked if x["fund_group"] == GROUP_INDEX_FUND]
+    rest = [x for x in ranked if x["fund_group"] != GROUP_INDEX_FUND]
+    return idx + rest
+
+
 def get_fund_dynamic_list(top_n=28, period="30D", cache_duration=24 * 3600):
     """
     获取动态选择的基金列表（基于收益率排名）
@@ -596,7 +656,7 @@ def get_fund_dynamic_list(top_n=28, period="30D", cache_duration=24 * 3600):
     :param period: 时间周期，默认30天
     :param cache_duration: 缓存持续时间，默认30分钟
     """
-    cache_key = f"dynamic_selected_funds_{top_n}_{period}"
+    cache_key = f"dynamic_selected_funds_px_{top_n}_{period}"
 
     # 尝试从缓存获取数据
     cached_data = get_fund_cached_data(cache_key)
@@ -621,61 +681,24 @@ def get_fund_dynamic_list(top_n=28, period="30D", cache_duration=24 * 3600):
         for index, fund in funds_to_process.iterrows():
             fund_code = str(fund.get("基金代码", ""))
             fund_name = fund.get("基金简称", "")
-
             try:
-                # 使用批量获取的数据
-                history = batch_histories.get(fund_code, pd.DataFrame())
-
-                # 统一处理history数据，确保是一致的格式
-                history_records = _ensure_consistent_format(history)
-
-                # 检查是否有足够的数据进行计算
-                has_data = False
-                latest_nav = None
-                earliest_nav = None
-
-                if (
-                    len(history_records) >= 2
-                    and "单位净值" in history_records[0]
-                    and "单位净值" in history_records[-1]
-                ):
-                    has_data = True
-                    # 计算期间收益率
-                    latest_nav = history_records[-1]["单位净值"]
-                    earliest_nav = history_records[0]["单位净值"]
-
-                if has_data:
-                    if (
-                        latest_nav is not None
-                        and earliest_nav is not None
-                        and str(latest_nav) != "None"
-                        and str(earliest_nav) != "None"
-                        and float(earliest_nav) != 0
-                    ):
-                        return_rate = (
-                            (float(latest_nav) - float(earliest_nav))
-                            / float(earliest_nav)
-                            * 100
-                        )
-
-                        ranked_funds.append(
-                            {
-                                "symbol": fund_code,
-                                "name": fund_name,
-                                "current_price": float(latest_nav),
-                                "change_percent": round(return_rate, 2),
-                                "change_amount": round(
-                                    float(latest_nav) - float(earliest_nav), 4
-                                ),
-                                "days": len(history_records),
-                            }
-                        )
+                ret = _period_return(batch_histories.get(fund_code, pd.DataFrame()))
+                if ret:
+                    ranked_funds.append({
+                        "symbol": fund_code, "name": fund_name,
+                        "current_price": ret["current"],
+                        "change_percent": ret["rate"],
+                        "change_amount": ret["amount"], "days": ret["days"],
+                    })
             except Exception as e:
                 logger.debug(f"计算基金 {fund_code} 收益率时出错: {e}")
                 continue
 
         # 按收益率排序
         ranked_funds.sort(key=lambda x: x["change_percent"], reverse=True)
+
+        # 大盘指数 ETF 恒置顶（保证不被 top_n 截断）
+        ranked_funds = _pin_index_funds(ranked_funds)
 
         # 返回前N只
         top_funds = ranked_funds[:top_n]
@@ -697,7 +720,7 @@ def get_fund_ranking(period: str = "30D"):
     获取按收益率排名的SELECTED的基金列表
     :param period: 时间周期，默认1个月
     """
-    cache_key = f"top_funds_by_return_{period}"
+    cache_key = f"top_funds_by_return_px_{period}"
 
     # 尝试从缓存获取数据
     cached_data = get_fund_cached_data(cache_key)
@@ -719,52 +742,18 @@ def get_fund_ranking(period: str = "30D"):
         )  # 使用较小的延时
 
         ranked_funds = []
-        for index, fund in funds_to_process.iterrows():
+        for _, fund in funds_to_process.iterrows():
             fund_code = str(fund.get("基金代码", ""))
             fund_name = fund.get("基金简称", "")
-
             try:
-                # 使用批量获取的数据
-                history = batch_histories.get(fund_code, pd.DataFrame())
-
-                # 统一处理history数据，确保是一致的格式
-                history_records = _ensure_consistent_format(history)
-
-                # 检查是否有足够的数据进行计算
-                has_data = False
-                latest_nav = None
-                earliest_nav = None
-
-                if (
-                    len(history_records) >= 2
-                    and "单位净值" in history_records[0]
-                    and "单位净值" in history_records[-1]
-                ):
-                    has_data = True
-                    # 计算期间收益率
-                    latest_nav = history_records[-1]["单位净值"]
-                    earliest_nav = history_records[0]["单位净值"]
-
-                if has_data:
-                    if latest_nav and earliest_nav and float(earliest_nav) != 0:
-                        return_rate = (
-                            (float(latest_nav) - float(earliest_nav))
-                            / float(earliest_nav)
-                            * 100
-                        )
-
-                        ranked_funds.append(
-                            {
-                                "symbol": fund_code,
-                                "name": fund_name,
-                                "current_price": float(latest_nav),
-                                "change_percent": round(return_rate, 2),
-                                "change_amount": round(
-                                    float(latest_nav) - float(earliest_nav), 4
-                                ),
-                                "days": len(history_records),
-                            }
-                        )
+                ret = _period_return(batch_histories.get(fund_code, pd.DataFrame()))
+                if ret:
+                    ranked_funds.append({
+                        "symbol": fund_code, "name": fund_name,
+                        "current_price": ret["current"],
+                        "change_percent": ret["rate"],
+                        "change_amount": ret["amount"], "days": ret["days"],
+                    })
             except Exception as e:
                 logger.debug(f"计算基金 {fund_code} 收益率时出错: {e}")
                 continue
@@ -773,6 +762,8 @@ def get_fund_ranking(period: str = "30D"):
         ranked_funds.sort(key=lambda x: x["change_percent"], reverse=True)
         for i, item in enumerate(ranked_funds):
             item["rank"] = i + 1
+        # 大盘指数 ETF 恒置顶（保证不被 top_n 截断；前端仍按涨跌幅展示并用 ★ 区分）
+        ranked_funds = _pin_index_funds(ranked_funds)
         set_fund_cache_data(cache_key, ranked_funds)
         logger.info(f"成功获取按收益率排名的基金列表（共{len(ranked_funds)}只）")
         return ranked_funds
@@ -791,7 +782,7 @@ def get_fund_chart_data(
     :param use_growth_rate: 是否使用增长率对比
     :return: 适合ECharts展示的数据格式
     """
-    cache_key = f"prepared_fund_chart_data_{','.join(sorted(symbols))}_{period}_{use_growth_rate}"
+    cache_key = f"prepared_fund_chart_data_px_{','.join(sorted(symbols))}_{period}_{use_growth_rate}"
 
     # 尝试从缓存获取数据
     cached_data = get_fund_cached_data(cache_key)
@@ -824,8 +815,8 @@ def get_fund_chart_data(
         all_dates = set()
         for symbol, history in multi_history_data.items():
             for item in history:
-                if isinstance(item, dict) and "净值日期" in item:
-                    all_dates.add(item["净值日期"])
+                if isinstance(item, dict) and _CL_DATE in item:
+                    all_dates.add(item[_CL_DATE])
         chart_data["dates"] = sorted(list(all_dates))
 
         # 为每个基金生成系列数据
@@ -840,8 +831,8 @@ def get_fund_chart_data(
                 date_to_value = {}
                 for item in history:
                     if isinstance(item, dict):
-                        date_key = item.get("净值日期")
-                        nav_value = item.get("单位净值")
+                        date_key = item.get(_CL_DATE)
+                        nav_value = item.get(_CL_CLOSE)
                         if date_key and nav_value is not None:
                             date_to_value[date_key] = (
                                 float(nav_value) if nav_value != "" else None
@@ -980,98 +971,6 @@ def get_fund_chart_data(
 
         traceback.print_exc()
         return None
-
-
-def update_selected_fund_list():
-    """
-    更新SELECTED_FUND_LIST，仅保留排名前100的基金
-    基于全量基金池_ALL_FUND_LIST_进行计算
-    """
-    global SELECTED_FUND_LIST
-
-    try:
-        # 从全量基金池中计算排名
-        # 批量获取基金历史数据
-        fund_codes = [str(fund["基金代码"]).zfill(6) for fund in _ALL_FUND_LIST_]
-        batch_histories = get_fund_histories_smart_batch(
-            fund_codes, period="12M", delay=0.4
-        )  # 使用较小的延时
-
-        ranked_funds = []
-        for fund in _ALL_FUND_LIST_:
-            fund_code = str(fund["基金代码"]).zfill(6)
-            fund_name = fund["基金简称"]
-
-            try:
-                # 使用批量获取的数据
-                history = batch_histories.get(fund_code, pd.DataFrame())
-
-                # 统一处理history数据，确保是一致的格式
-                history_records = _ensure_consistent_format(history)
-
-                # 检查是否有足够的数据进行计算
-                has_data = False
-                latest_nav = None
-                earliest_nav = None
-
-                if (
-                    len(history_records) >= 2
-                    and "单位净值" in history_records[0]
-                    and "单位净值" in history_records[-1]
-                ):
-                    has_data = True
-                    # 计算期间收益率
-                    latest_nav = history_records[-1]["单位净值"]
-                    earliest_nav = history_records[0]["单位净值"]
-
-                if has_data:
-                    if latest_nav and earliest_nav and float(earliest_nav) != 0:
-                        return_rate = (
-                            (float(latest_nav) - float(earliest_nav))
-                            / float(earliest_nav)
-                            * 100
-                        )
-
-                        ranked_funds.append(
-                            {
-                                "symbol": fund_code,
-                                "name": fund_name,
-                                "current_price": float(latest_nav),
-                                "change_percent": round(return_rate, 2),
-                                "change_amount": round(
-                                    float(latest_nav) - float(earliest_nav), 4
-                                ),
-                                "days": len(history_records),
-                            }
-                        )
-            except Exception as e:
-                logger.debug(f"计算基金 {fund_code} 收益率时出错: {e}")
-                continue
-
-        # 按收益率排序
-        ranked_funds.sort(key=lambda x: x["change_percent"], reverse=True)
-
-        # 取前100名基金代码
-        top_100_codes = {fund["symbol"] for fund in ranked_funds[:100]}
-
-        # 从全量列表中筛选出前100名基金
-        SELECTED_FUND_LIST = [
-            fund
-            for fund in _ALL_FUND_LIST_
-            if str(fund["基金代码"]).zfill(6) in top_100_codes
-        ][
-            :100
-        ]  # 确保不超过100只
-
-        logger.info(f"SELECTED_FUND_LIST已更新，包含{len(SELECTED_FUND_LIST)}只基金")
-        return True
-
-    except Exception as e:
-        logger.error(f"更新SELECTED_FUND_LIST失败: {e}")
-        import traceback
-
-        traceback.print_exc()
-        return False
 
 
 if __name__ == "__main__":

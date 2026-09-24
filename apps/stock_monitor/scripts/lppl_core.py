@@ -3,6 +3,9 @@ LPPL分析器模块
 将ultimate_lppl_model中的功能适配到stock_monitor系统
 """
 
+import sys
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -10,6 +13,13 @@ from scipy.optimize import minimize, differential_evolution
 from datetime import datetime, timedelta
 import warnings
 import logging
+
+try:
+    from ._bootstrap import ensure_project_root
+except ImportError:
+    from _bootstrap import ensure_project_root
+
+ensure_project_root()
 
 from config import setup_logger
 

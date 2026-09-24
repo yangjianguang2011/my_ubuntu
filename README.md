@@ -8,15 +8,15 @@
 
 ## 🎯 核心模块
 
-### 1. Crawlers - 爬虫模块
+### 1. 爬虫模块
 
-**位置**: `apps/crawlers/`
+**位置**: `apps/xueqiu_api/`、`apps/eastmoney/`（原 `apps/crawlers/` 已拆分到 apps 下）
 
 独立的爬虫模块，与 stock_monitor 解耦。
 
 **子模块**:
-- **xueqiu/** - 雪球大 V 文章抓取
-- **eastmoney/** - 东方财富分析师数据采集
+- **apps/xueqiu_api/** - 雪球大 V 文章抓取（接口版：Chrome + JSON 接口）
+- **apps/eastmoney/** - 东方财富分析师数据采集
 
 
 ---
@@ -71,17 +71,20 @@ docker-compose logs -f
 docker-compose down
 ```
 
+> 功能开关（默认关闭，代码保留）：`ENABLE_OPENCLAW`、`ENABLE_TELEGRAM`。
+> 开启 OpenClaw 需重建镜像：`ENABLE_OPENCLAW=1 docker compose build && docker compose up -d`。
+
 ### 单独运行模块
 
 #### 运行爬虫
 
 ```bash
-# 雪球爬虫
-cd apps/crawlers/xueqiu
+# 雪球爬虫（接口版）
+cd apps/xueqiu_api
 bash run_xueqiu.sh
 
 # 东方财富爬虫
-cd apps/crawlers/eastmoney
+cd apps/eastmoney
 bash run_eastmoney.sh
 
 # IPTV
@@ -112,8 +115,8 @@ python3 start_app.py
 |------|------|------|
 | 每 8 小时 | 新闻爬虫 | apps/news |
 | 每天 23:05 | IPTV 频道下载 | apps/iptv |
-| 每天 23:10 | 雪球爬虫 | apps/crawlers/xueqiu |
-| 每天 23:40 | 东方财富分析师 | apps/crawlers/eastmoney |
+| 每天 23:10 | 雪球爬虫 | apps/xueqiu_api |
+| 每天 23:40 | 东方财富分析师 | apps/eastmoney |
 
 ---
 
@@ -124,7 +127,6 @@ python3 start_app.py
 | 4400 | Nginx Web | 静态资源/报告 |
 | 4401 | Stock Monitor | 股票监控 Web 界面 |
 | 4422 | SSH | 远程管理 |
-| 38789 | OpenClaw | 浏览器自动化 |
 
 ---
 
@@ -134,7 +136,6 @@ python3 start_app.py
 |--------|------|
 | `/data` | 主要数据存储 |
 | `/paddle` | PaddleOCR 模型 |
-| `/openclaw` | openclaw 持久化目录 |
 
 ---
 

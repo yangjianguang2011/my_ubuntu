@@ -78,6 +78,26 @@ const FundCache = {
 };
 
 // 加载基金排名
+// ---- stockdb 不可用警示（后端在响应里带 stockdb_error 字段）----
+function renderStockdbWarning(response) {
+    var msg = response && response.stockdb_error;
+    var el = document.getElementById('fund-stockdb-warning');
+    if (!msg) { if (el && el.parentNode) el.parentNode.removeChild(el); return; }
+    var safe = String(msg).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    if (!el) {
+        el = document.createElement('div');
+        el.id = 'fund-stockdb-warning';
+        el.className = 'stockdb-warning';
+        var page = document.getElementById('fund-monitor-page');
+        var anchor = page ? page.querySelector('h2') : null;
+        if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(el, anchor.nextSibling);
+        else if (page) page.insertBefore(el, page.firstChild);
+        else return;
+    }
+    el.innerHTML = '⚠ <strong>stockdb 不可用</strong>：数据已降级为 akshare（口径与场内前复权价不同）。'
+        + '<br><span style="font-size:12px;">' + safe + '</span>';
+}
+
 function loadFundRanking() {
     const topN = $('#top-n-fund').val();
     const period = $('#fund-period-select').val();
@@ -104,6 +124,7 @@ function loadFundRanking() {
 
     $.get(`/api/fund/ranking?top_n=${actualTopN}&period=${period}`, function(response) {
         if (response.success) {
+            renderStockdbWarning(response);
             const data = response.data;
             
             // 缓存数据
@@ -160,7 +181,19 @@ function initFundRankingTable(data) {
             hozAlign: "center"
         },
         {title: "代码", field: "symbol", width: 100, headerSort: true},
-        {title: "名称", field: "name", width: 120, headerSort: true},
+        {title: "名称", field: "name", width: 150, headerSort: true,
+            formatter: function(cell, formatterParams, onRendered) {
+                const name = String(cell.getValue() || '');
+                const row = cell.getRow().getData() || {};
+                // 分组只认后端下发的 fund_group（唯一来源）
+                const isIdx = String(row.fund_group || '').indexOf('大盘指数') === 0;
+                if (!isIdx) return name;
+                cell.getElement().style.fontWeight = '600';
+                cell.getElement().title = '大盘指数 ETF：与指数页「大盘指数」组一一对应'
+                    + '（口径为 ETF 前复权价格，与指数点位收益略有差异）';
+                return '★ ' + name;
+            }
+        },
         {title: "当前价格", field: "current_price", width: 100, headerSort: true,
             sorter: "number",
             formatter: function(cell, formatterParams, onRendered) {
@@ -201,9 +234,20 @@ function initFundRankingTable(data) {
         pagination: false, // 关闭分页
         movableColumns: true,
         columnHeaderVertAlign: "bottom",
-        initialSort: [
-            {column: "change_percent", dir: "desc"} // 默认按涨跌幅降序排列
-        ],
+        // 按分组显示（数据顺序：大盘指数ETF 在前，组内按涨幅）；不用 initialSort 以免打乱分组顺序
+        groupBy: "fund_group",
+        groupStartOpen: true,
+        groupHeader: function(value, count, data, group) {
+            const isIdx = String(value).indexOf('大盘指数') === 0;
+            const color = isIdx ? '#1f7a33' : '#666';
+            const tip = isIdx
+                ? '大盘指数 ETF（沪深300/上证50/中证500/中证1000/上证180/创业板50）'
+                  + '：口径为 ETF 前复权价格，与指数点位收益略有差异'
+                : '行业/主题 ETF';
+            return '<span title="' + tip + '" style="font-weight:600;color:' + color + ';">'
+                + (isIdx ? '★ ' : '') + value + '</span>'
+                + ' <span style="color:#999;">(' + count + ')</span>';
+        },
         rowFormatter: function(row) {
             // 为行添加颜色编码
             const rowData = row.getData();
@@ -271,6 +315,7 @@ function loadFundNamesForChart() {
     // 从API获取动态基金列表，按涨跌幅降序排列
     $.get('/api/fund/dynamic_list?sort=change_desc&top_n=28&period=30D', function(response) {
         if (response.success) {
+            renderStockdbWarning(response);
             const funds = response.data;
             FundCache.set(cacheKey, funds, 5);
             displayFundCheckboxes(funds);
@@ -279,6 +324,7 @@ function loadFundNamesForChart() {
             // 如果动态基金列表API失败，回退到传统的基金列表
             $.get('/api/fund/list?sort=change_desc', function(fallbackResponse) {
                 if (fallbackResponse.success) {
+                    renderStockdbWarning(fallbackResponse);
                     const funds = fallbackResponse.data;
                     FundCache.set(cacheKey, funds, 5); // 2分钟缓存
                     displayFundCheckboxes(funds);
@@ -324,10 +370,16 @@ function displayFundCheckboxes(funds) {
         const fundCode = fund.symbol || fund['基金代码'] || fund.fund_code;
         const fundName = fund.name || fund['基金简称'] || fund.fund_name || fund.基金简称;
 
+        // 分组只认后端下发的 fund_group（不在前端硬编码代码）
+        const isIdx = String(fund.fund_group || '').indexOf('大盘指数') === 0;
+        const star = isIdx
+            ? '<span style="color:#1f7a33;font-weight:600;">★ </span>'
+            : '';
+
         html += `
-            <label class="industry-checkbox-item">
+            <label class="checkbox-item"${isIdx ? ' title="大盘指数 ETF（与指数页「大盘指数」组一一对应）"' : ''}>
                 <input type="checkbox" value="${fundCode}" onchange="updateFundSelectedCount()">
-                <span>${fundName} (${fundCode})</span>
+                <span>${star}${fundName} (${fundCode})</span>
             </label>
         `;
     });
@@ -410,6 +462,7 @@ function renderFundChart() {
         }),
         success: function(response) {
             if (response.success) {
+                renderStockdbWarning(response);
                 initFundECharts(response.data, period);
             } else {
                 chartContainer.innerHTML = `<div class="error">加载图表数据失败: ${response.message}</div>`;

@@ -1,0 +1,24 @@
+# 构建上下文排除项（加速构建、避免把数据/密钥打进入镜像）
+.git
+.gitignore
+.gitattributes
+.vscode
+.workbuddy-ai
+docs
+tests
+run
+logs
+**/__pycache__
+**/*.py[cod]
+*.log
+
+# 私人配置与凭据（config.ini 仍需参与构建，见 Dockerfile；仅排除 cookies）
+apps/xueqiu/xueqiu_cookies*.txt
+apps/xueqiu/cookies_backups
+
+# 私有首页模板：构建时用 index.html.example 生成（见 Dockerfile）
+apps/stock_monitor/web_templates/index.html
+
+# 生成物
+apps/stock_monitor/reports
+apps/news/output

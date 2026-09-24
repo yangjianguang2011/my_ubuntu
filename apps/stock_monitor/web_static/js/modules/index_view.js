@@ -232,7 +232,18 @@ function initIndexRankingTable(data) {
             hozAlign: "center"
         },
         {title: "代码", field: "symbol", width: 100, headerSort: true},
-        {title: "名称", field: "name", width: 120, headerSort: true},
+        {title: "名称", field: "name", width: 150, headerSort: true,
+            formatter: function(cell, formatterParams, onRendered) {
+                const row = cell.getRow().getData() || {};
+                const value = cell.getValue();
+                if (row.is_real_valuation) {
+                    cell.getElement().style.fontWeight = '600';
+                    cell.getElement().title = '大盘指数指数：使用真实 PE/PB（乐咕乐股，月频）';
+                    return '★ ' + value;
+                }
+                return value;
+            }
+        },
         {title: "当前价格", field: "current_price", width: 100, headerSort: true,
             sorter: "number",
             formatter: function(cell, formatterParams, onRendered) {
@@ -270,7 +281,12 @@ function initIndexRankingTable(data) {
                 if (value === null || value === undefined || isNaN(value)) {
                     return 'N/A';
                 }
-                return parseFloat(value).toFixed(2);
+                const row = cell.getRow().getData() || {};
+                const est = String(row.valuation_source || '').indexOf('estimate') === 0;
+                if (est) {
+                    cell.getElement().title = '估算值（价格缩放，非真实估值）';
+                }
+                return (est ? '≈' : '') + parseFloat(value).toFixed(2);
             }
         },
         {title: "PB", field: "pb", width: 80, headerSort: true,
@@ -280,7 +296,12 @@ function initIndexRankingTable(data) {
                 if (value === null || value === undefined || isNaN(value)) {
                     return 'N/A';
                 }
-                return parseFloat(value).toFixed(2);
+                const row = cell.getRow().getData() || {};
+                const est = String(row.valuation_source || '').indexOf('estimate') === 0;
+                if (est) {
+                    cell.getElement().title = '估算值（价格缩放，非真实估值）';
+                }
+                return (est ? '≈' : '') + parseFloat(value).toFixed(2);
             }
         },
         {title: "PE百分位", field: "pe_percentile", width: 100, headerSort: true,
@@ -290,8 +311,13 @@ function initIndexRankingTable(data) {
                 if (value === null || value === undefined || isNaN(value)) {
                     return 'N/A';
                 }
+                const row = cell.getRow().getData() || {};
+                const est = String(row.valuation_source || '').indexOf('estimate') === 0;
+                if (est) {
+                    cell.getElement().title = '估算分位（实为价格分位，非真实估值分位）';
+                }
                 const percentile = parseFloat(value);
-                const displayValue = percentile.toFixed(2) + '%';
+                const displayValue = (est ? '≈' : '') + percentile.toFixed(2) + '%';
                 
                 // 根据百分位数设置颜色
                 let color = '#666'; // 默认灰色
@@ -314,8 +340,13 @@ function initIndexRankingTable(data) {
                 if (value === null || value === undefined || isNaN(value)) {
                     return 'N/A';
                 }
+                const row = cell.getRow().getData() || {};
+                const est = String(row.valuation_source || '').indexOf('estimate') === 0;
+                if (est) {
+                    cell.getElement().title = '估算分位（实为价格分位，非真实估值分位）';
+                }
                 const percentile = parseFloat(value);
-                const displayValue = percentile.toFixed(2) + '%';
+                const displayValue = (est ? '≈' : '') + percentile.toFixed(2) + '%';
                 
                 // 根据百分位数设置颜色
                 let color = '#666'; // 默认灰色
@@ -351,29 +382,6 @@ function initIndexRankingTable(data) {
                 cell.getElement().style.color = color;
                 return value;
             }
-        },
-        {title: "LPPL分析", field: "lppl_analysis", width: 120, headerSort: false,
-            formatter: function(cell, formatterParams, onRendered) {
-                const rowData = cell.getRow().getData();
-                const symbol = rowData.symbol;
-                const button = document.createElement('button');
-                button.innerHTML = 'LPPL分析';
-                button.className = 'lppl-analysis-btn';
-                button.style.background = 'linear-gradient(45deg, #ff6b6b, #ffa500)';
-                button.style.color = 'white';
-                button.style.border = 'none';
-                button.style.padding = '5px 10px';
-                button.style.borderRadius = '4px';
-                button.style.cursor = 'pointer';
-                button.onclick = function(e) {
-                    e.stopPropagation(); // 防止事件冒泡影响表格行的选择
-                    runSingleLpplAnalysis(symbol, rowData.name);
-                };
-                return button;
-            },
-            cellClick: function(e, cell) {
-                // 点击单元格时不执行任何操作，因为按钮有自己的点击事件
-            }
         }
     ];
 
@@ -385,9 +393,19 @@ function initIndexRankingTable(data) {
         pagination: false, // 关闭分页
         movableColumns: true,
         columnHeaderVertAlign: "bottom",
-        initialSort: [
-            {column: "change_percent", dir: "desc"} // 默认按涨跌幅降序排列
-        ],
+        // 按分组显示（数据顺序：大盘指数(真实估值)在前，组内按涨幅），不用 initialSort 以免打乱分组顺序
+        groupBy: "index_group",
+        groupStartOpen: true,
+        groupHeader: function(value, count, data, group) {
+            const isReal = String(value).indexOf('大盘指数') === 0;
+            const color = isReal ? '#1f7a33' : '#666';
+            const tip = isReal
+                ? '真实 PE/PB（乐咕乐股，月频）'
+                : '无公开估值源：PE/PB 为价格缩放估算（标记 ≈）';
+            return '<span title="' + tip + '" style="font-weight:600;color:' + color + ';">'
+                + (isReal ? '★ ' : '') + value + '</span>'
+                + ' <span style="color:#999;">(' + count + ')</span>';
+        },
         rowFormatter: function(row) {
             // 为行添加颜色编码
             const rowData = row.getData();
@@ -482,11 +500,21 @@ function displayIndexCheckboxes(indices) {
     }
 
     let html = '';
-    indices.forEach((index, indexNum) => {
+    let lastGroup = null;
+    indices.forEach((index) => {
+        // 分组只认后端下发的 index_group（唯一来源；后端 get_index_ranking 统一给出）
+        const isReal = String(index.index_group || '').indexOf('大盘指数') === 0;
+        const group = isReal ? '大盘指数(真实估值)' : '行业主题(估算)';
+        // 分组标题（大盘指数在前，见后端排序）
+        if (group !== lastGroup) {
+            html += `<div style="grid-column:1/-1;font-weight:600;color:${isReal ? '#1f7a33' : '#888'};margin:4px 0 2px;font-size:12px;">`
+                + (isReal ? '★ ' : '') + group + '</div>';
+            lastGroup = group;
+        }
         html += `
-            <label class="industry-checkbox-item">
+            <label class="checkbox-item" title="${isReal ? '真实 PE/PB（乐咕，月频）' : '无公开估值源，PE/PB 为估算'}">
                 <input type="checkbox" value="${index.symbol}" onchange="updateIndexSelectedCount()">
-                <span>${index.name} (${index.symbol})</span>
+                <span>${isReal ? '★ ' : ''}${index.name} (${index.symbol})</span>
             </label>
         `;
     });
@@ -682,9 +710,11 @@ function initIndexECharts(chartData, period) {
 
                 let result = `<div style="font-weight: bold; margin-bottom: 5px;">${formattedDate}</div>`;
                 params.forEach(param => {
+                    // 时间轴 + [时间戳, 值] 数据点：param.value 是数组，须取第 2 项为真实数值
+                    const raw = Array.isArray(param.value) ? param.value[1] : param.value;
                     // 检查值是否为有效数字
-                    if (param.value !== null && param.value !== undefined && param.value !== '-') {
-                        const value = parseFloat(param.value);
+                    if (raw !== null && raw !== undefined && raw !== '-') {
+                        const value = parseFloat(raw);
                         if (!isNaN(value)) {
                             result += `<div style="display: flex; align-items: center; margin: 2px 0;">
                                 <span style="display: inline-block; width: 10px; height: 10px; background: ${param.color}; margin-right: 5px; border-radius: 50%;"></span>
@@ -791,668 +821,3 @@ function initIndexECharts(chartData, period) {
 
 console.log('index_view.js模块已加载，等待按需初始化');
 
-// LPPL分析功能模块
-let lpplAnalysisChart = null; // 全局图表变量
-
-function initializeLpplAnalysis() {
-    console.log("初始化LPPL分析功能");
-    // 顶部的LPPL分析按钮已移除，改为每行添加按钮
-    console.log("LPPL分析功能初始化完成（每行添加按钮模式）");
-}
-
-// 初始化单个指数的LPPL分析
-function initializeSingleIndexLpplAnalysis() {
-    console.log("单个指数LPPL分析功能已就绪");
-}
-
-function runSingleLpplAnalysis(symbol, indexName) {
-    console.log("开始运行单个指数LPPL分析...", symbol, indexName);
-    
-    // 显示加载提示
-    showLpplLoadingIndicator();
-    
-    // 调用后端API进行LPPL分析
-    $.ajax({
-        url: '/api/index/lppl_analysis_single',
-        method: 'POST',
-        contentType: 'application/json',
-        data: JSON.stringify({
-            symbol: symbol,      // 单个指数代码
-            name: indexName,     // 指数名称
-            period: '3Y'         // 3年数据进行分析
-        }),
-        success: function(response) {
-            hideLpplLoadingIndicator();
-            
-            if (response.success) {
-                console.log("LPPL分析完成", response.data);
-                
-                // 将结果包装为与批量分析相同的格式，以便复用显示函数
-                const wrappedResult = {};
-                wrappedResult[symbol] = response.data;
-                
-                displayLpplResults(wrappedResult, indexName);  // 传递指数名称
-            } else {
-                alert(`LPPL分析失败: ${response.message}`);
-            }
-        },
-        error: function(xhr, status, error) {
-            hideLpplLoadingIndicator();
-            console.error("LPPL分析请求失败:", error);
-            alert(`LPPL分析请求失败: ${error}`);
-        }
-    });
-}
-
-
-
-
-
-function showLpplLoadingIndicator() {
-    // 创建加载遮罩层
-    const overlay = $(`
-        <div id="lppl-loading-overlay" style="
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background: rgba(0, 0, 0, 0.5);
-            z-index: 9999;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-        ">
-            <div style="
-                background: white;
-                padding: 30px;
-                border-radius: 8px;
-                text-align: center;
-                box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
-            ">
-                <div style="font-size: 18px; margin-bottom: 15px;">正在进行LPPL泡沫分析...</div>
-                <div class="spinner" style="
-                    border: 4px solid #f3f3f3;
-                    border-top: 4px solid #3498db;
-                    border-radius: 50%;
-                    width: 40px;
-                    height: 40px;
-                    animation: spin 1s linear infinite;
-                    margin: 0 auto;
-                "></div>
-                <div style="margin-top: 15px; font-size: 14px; color: #666;">分析可能需要几分钟时间</div>
-            </div>
-        </div>
-    `);
-    
-    $('body').append(overlay);
-    
-    // 添加旋转动画CSS
-    if (!$('#lppl-spinner-style').length) {
-        $('head').append(`
-            <style id="lppl-spinner-style">
-                @keyframes spin {
-                    0% { transform: rotate(0deg); }
-                    100% { transform: rotate(360deg); }
-                }
-            </style>
-        `);
-    }
-}
-
-function hideLpplLoadingIndicator() {
-    $('#lppl-loading-overlay').remove();
-}
-
-function displayLpplResults(results, indexName = null) {
-    console.log("显示LPPL分析结果", results);
-    
-    // 获取实际的指数名称，如果indexName未传入则从结果中获取
-    let displayName = indexName;
-    if (!displayName) {
-        // 从结果中获取第一个索引的名称
-        const firstKey = Object.keys(results)[0];
-        if (results[firstKey] && results[firstKey].index_name) {
-            displayName = results[firstKey].index_name;
-        } else {
-            displayName = firstKey;
-        }
-    }
-    
-    // 创建结果展示模态框
-    const modalHtml = `
-        <div id="lppl-results-modal" class="modal-overlay" style="
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background: rgba(0, 0, 0, 0.7);
-            z-index: 10000;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-        ">
-            <div class="modal-content" style="
-                background: white;
-                width: 90%;
-                max-width: 1200px;
-                max-height: 90vh;
-                overflow-y: auto;
-                border-radius: 8px;
-                padding: 20px;
-                position: relative;
-            ">
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
-                    <h2>LPPL泡沫分析结果 - ${displayName || '指数'}</h2>
-                    <button id="close-lppl-modal" style="
-                        background: #e74c3c;
-                        color: white;
-                        border: none;
-                        border-radius: 4px;
-                        padding: 5px 10px;
-                        cursor: pointer;
-                    ">关闭</button>
-                </div>
-                
-                <div id="lppl-results-container">
-                    <!-- 结果将动态插入 -->
-                </div>
-                
-                <div id="lppl-visualization-container" style="margin-top: 20px; height: 600px; border: 1px solid #ddd; border-radius: 4px;">
-                    <!-- ECharts可视化将在此显示 -->
-                </div>
-            </div>
-        </div>
-    `;
-    
-    $('body').append(modalHtml);
-    
-    // 填充结果数据
-    const resultsContainer = $('#lppl-results-container');
-    let resultsHtml = '<div class="results-summary"><h3>分析摘要</h3>';
-    
-    for (const [symbol, result] of Object.entries(results)) {
-        if (result.success) {
-            const bubbleInfo = result.bubble_info || {};
-            resultsHtml += `
-                <div style="margin: 15px 0; padding: 15px; border: 1px solid #e0e0e0; border-radius: 6px; background-color: #f9f9f9;">
-                    <div style="font-weight: bold; font-size: 16px; margin-bottom: 10px; color: #2c3e50;">
-                        指数: ${symbol}
-                    </div>
-                    <div style="margin: 8px 0;">
-                        <span style="font-weight: bold;">风险等级:</span>
-                        <span style="color: ${
-                            (result.bubble_info && result.bubble_info.risk_level) === '高风险' ? '#e74c3c' : 
-                            (result.bubble_info && result.bubble_info.risk_level) === '中风险' ? '#f39c12' : 
-                            (result.bubble_info && result.bubble_info.risk_level) === '低风险' ? '#27ae60' : '#7f8c8d'
-                        }; font-weight: bold; font-size: 16px; margin-left: 10px;">${(result.bubble_info && result.bubble_info.risk_level) || result.risk_level || 'Unknown'}</span>
-                    </div>
-                    <div style="margin: 8px 0;">
-                        <span style="font-weight: bold;">泡沫评分:</span>
-                        <span style="color: #3498db; font-weight: bold; margin-left: 10px;">${((result.bubble_info && result.bubble_info.bubble_score) || result.bubble_score || 0).toFixed(3)}</span>
-                    </div>
-                    <div style="margin: 8px 0;">
-                        <span style="font-weight: bold;">拟合误差(MSE):</span>
-                        <span style="color: #9b59b6; font-weight: bold; margin-left: 10px;">${(result.fitting_error || 0).toExponential(3)}</span>
-                    </div>
-                </div>
-            `;
-            
-            // 添加详细参数信息及解释
-            if (result.model_params) {
-                resultsHtml += `
-                    <div style="margin: 15px 0; padding: 15px; border: 1px solid #3498db; border-radius: 6px; background-color: #ecf0f1;">
-                        <div style="font-weight: bold; color: #2980b9; margin-bottom: 10px;">模型参数详情:</div>
-                        <table style="width: 100%; border-collapse: collapse; margin-bottom: 10px;">
-                            <thead>
-                                <tr style="background-color: #d6eaf8;">
-                                    <th style="border: 1px solid #bfe0f1; padding: 8px; text-align: left;">参数</th>
-                                    <th style="border: 1px solid #bfe0f1; padding: 8px; text-align: left;">数值</th>
-                                    <th style="border: 1px solid #bfe0f1; padding: 8px; text-align: left;">含义</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                <tr>
-                                    <td style="border: 1px solid #bfe0f1; padding: 8px;"><strong>临界时间(tc)</strong></td>
-                                    <td style="border: 1px solid #bfe0f1; padding: 8px;">${result.model_params.critical_time ? result.model_params.critical_time.toFixed(2) : 'N/A'}</td>
-                                    <td style="border: 1px solid #bfe0f1; padding: 8px;">系统奇异性发生的时间点，可能对应市场转折点</td>
-                                </tr>
-                                <tr style="background-color: #f0f7fb;">
-                                    <td style="border: 1px solid #bfe0f1; padding: 8px;"><strong>加速参数(m)</strong></td>
-                                    <td style="border: 1px solid #bfe0f1; padding: 8px;">${result.model_params.acceleration_param ? result.model_params.acceleration_param.toFixed(4) : 'N/A'}</td>
-                                    <td style="border: 1px solid #bfe0f1; padding: 8px;">价格增长的加速程度，值越大表示加速越快</td>
-                                </tr>
-                                <tr>
-                                    <td style="border: 1px solid #bfe0f1; padding: 8px;"><strong>振荡频率(w)</strong></td>
-                                    <td style="border: 1px solid #bfe0f1; padding: 8px;">${result.model_params.frequency_param ? result.model_params.frequency_param.toFixed(4) : 'N/A'}</td>
-                                    <td style="border: 1px solid #bfe0f1; padding: 8px;">价格振荡的频率，反映市场情绪的波动节奏</td>
-                                </tr>
-                                <tr style="background-color: #f0f7fb;">
-                                    <td style="border: 1px solid #bfe0f1; padding: 8px;"><strong>偏移参数(A)</strong></td>
-                                    <td style="border: 1px solid #bfe0f1; padding: 8px;">${result.model_params.offset_param ? result.model_params.offset_param.toFixed(4) : 'N/A'}</td>
-                                    <td style="border: 1px solid #bfe0f1; padding: 8px;">整体价格水平的基准值</td>
-                                </tr>
-                                <tr>
-                                    <td style="border: 1px solid #bfe0f1; padding: 8px;"><strong>泡沫强度(B)</strong></td>
-                                    <td style="border: 1px solid #bfe0f1; padding: 8px;">${result.model_params.bubble_strength ? result.model_params.bubble_strength.toFixed(4) : 'N/A'}</td>
-                                    <td style="border: 1px solid #bfe0f1; padding: 8px;">泡沫形成的强度，正值表示泡沫，负值表示反泡沫</td>
-                                </tr>
-                                <tr style="background-color: #f0f7fb;">
-                                    <td style="border: 1px solid #bfe0f1; padding: 8px;"><strong>振荡强度(C)</strong></td>
-                                    <td style="border: 1px solid #bfe0f1; padding: 8px;">${result.model_params.oscillation_strength ? result.model_params.oscillation_strength.toFixed(4) : 'N/A'}</td>
-                                    <td style="border: 1px solid #bfe0f1; padding: 8px;">价格振荡的幅度，反映市场波动的剧烈程度</td>
-                                </tr>
-                                <tr>
-                                    <td style="border: 1px solid #bfe0f1; padding: 8px;"><strong>相位参数(φ)</strong></td>
-                                    <td style="border: 1px solid #bfe0f1; padding: 8px;">${result.model_params.phi_param ? result.model_params.phi_param.toFixed(4) : 'N/A'}</td>
-                                    <td style="border: 1px solid #bfe0f1; padding: 8px;">振荡的起始相位，影响振荡的初始状态</td>
-                                </tr>
-                            </tbody>
-                        </table>
-                    </div>
-                `;
-            }
-            
-            // 添加风险评估解释
-            resultsHtml += `
-                <div style="margin: 15px 0; padding: 15px; border: 1px solid #f39c12; border-radius: 6px; background-color: #fef9e7;">
-                    <div style="font-weight: bold; color: #d35400; margin-bottom: 10px;">风险评估说明:</div>
-                    <ul style="margin: 0; padding-left: 20px;">
-                        <li>风险等级基于泡沫强度(B)、振荡强度(C)和加速参数(m)等综合计算</li>
-                        <li>高风险表示可能存在显著的投机泡沫，市场转折风险较高</li>
-                        <li>中风险表示存在一定的投机行为，需要密切关注市场变化</li>
-                        <li>低风险表示市场相对稳定，泡沫特征不明显</li>
-                        <li>泡沫评分越接近1.0，泡沫特征越明显；越接近0，越稳定</li>
-                    </ul>
-                </div>
-            `;
-        } else {
-            resultsHtml += `
-                <div style="margin: 15px 0; padding: 15px; border: 1px solid #e74c3c; border-radius: 6px; background-color: #fadbd8; color: #c0392b;">
-                    <div style="font-weight: bold; font-size: 16px;">指数: ${symbol}</div>
-                    <div>分析失败: ${result.error}</div>
-                </div>
-            `;
-        }
-    }
-    
-    resultsHtml += '</div>';
-    
-    resultsContainer.html(resultsHtml);
-    
-    // 绑定关闭事件
-    $('#close-lppl-modal').on('click', function() {
-        $('#lppl-results-modal').remove();
-        if (lpplAnalysisChart) {
-            lpplAnalysisChart.dispose();
-            lpplAnalysisChart = null;
-        }
-    });
-    
-    // 创建ECharts可视化
-    createSandDanceVisualization(results);
-}
-
-function createSandDanceVisualization(results) {
-    console.log("开始创建ECharts可视化", results);
-    
-    // 准备ECharts数据 - 支持多个指数的数据
-    let allChartData = [];
-    
-    // 从结果中提取所有有效的数据
-    for (const [symbol, result] of Object.entries(results)) {
-        if (result.success && result.residual_analysis) {
-            const resAnalysis = result.residual_analysis;
-            if (resAnalysis.dates && resAnalysis.residuals && resAnalysis.actual_values && resAnalysis.fitted_values) {
-                // 不限制数据点数量，使用所有数据点
-                const chartData = {
-                    symbol: symbol,
-                    dates: resAnalysis.dates,
-                    residuals: resAnalysis.residuals,
-                    actualPrices: resAnalysis.actual_values,
-                    fittedPrices: resAnalysis.fitted_values
-                };
-                
-                allChartData.push(chartData);
-                console.log(`为指数 ${symbol} 准备了 ${resAnalysis.dates.length} 个数据点用于ECharts可视化`);
-            } else {
-                console.warn(`指数 ${symbol} 残差分析数据不完整`, resAnalysis);
-            }
-        } else {
-            console.warn(`指数 ${symbol} 残差分析失败或数据为空`, result);
-        }
-    }
-    
-    if (allChartData.length > 0) {
-        // 计算残差的标准差，用于确定±80% 阈值线
-        let allResiduals = [];
-        allChartData.forEach(chartData => {
-            allResiduals = allResiduals.concat(chartData.residuals);
-        });
-        const residualStd = Math.sqrt(allResiduals.reduce((sum, r) => sum + r * r, 0) / allResiduals.length);
-        const thresholdPlus = residualStd * 0.8;  // +80% 标准差
-        const thresholdMinus = -residualStd * 0.8;  // -80% 标准差
-        
-        // 获取容器元素
-        const chartContainer = document.getElementById('lppl-visualization-container');
-        if (!chartContainer) {
-            console.error("找不到可视化容器元素 #lppl-visualization-container");
-            $('#lppl-visualization-container').html('<div style="display: flex; align-items: center; justify-content: center; height: 100%; color: #999;">找不到可视化容器</div>');
-            return;
-        }
-        
-        // 清空容器并创建两个图表容器
-        chartContainer.innerHTML = `
-            <div id="price-comparison-chart" style="height: 300px; margin-bottom: 20px; border: 1px solid #ddd; border-radius: 4px;"></div>
-            <div id="residual-analysis-chart" style="height: 300px; border: 1px solid #ddd; border-radius: 4px;"></div>
-        `;
-        
-        // 创建价格对比图表 - 支持多条线
-        const priceChartDom = document.getElementById('price-comparison-chart');
-        if (priceChartDom) {
-            const priceChart = echarts.init(priceChartDom);
-            
-            // 构建多条线的数据
-            let allDates = [];
-            let priceSeries = [];
-            let legendData = [];
-            
-            allChartData.forEach((chartData, index) => {
-                // 使用第一个图表的数据作为日期轴（假设所有图表的日期是一致的）
-                if (allDates.length === 0) {
-                    allDates = chartData.dates;
-                }
-                
-                // 实际价格线
-                priceSeries.push({
-                    name: `${chartData.symbol} 实际价格`,
-                    type: 'line',
-                    data: chartData.dates.map((dateStr, i) => {
-                        const dateParts = dateStr.split('-');
-                        const timestamp = new Date(Date.UTC(dateParts[0], dateParts[1] - 1, dateParts[2])).getTime();
-                        return [timestamp, chartData.actualPrices[i]];
-                    }),
-                    smooth: true,
-                    lineStyle: {
-                        color: getColorByIndex(index * 2),
-                        width: 2
-                    },
-                    showSymbol: false
-                });
-                
-                // 拟合价格线
-                priceSeries.push({
-                    name: `${chartData.symbol} 拟合价格`,
-                    type: 'line',
-                    data: chartData.dates.map((dateStr, i) => {
-                        const dateParts = dateStr.split('-');
-                        const timestamp = new Date(Date.UTC(dateParts[0], dateParts[1] - 1, dateParts[2])).getTime();
-                        return [timestamp, chartData.fittedPrices[i]];
-                    }),
-                    smooth: true,
-                    lineStyle: {
-                        color: getColorByIndex(index * 2 + 1),
-                        width: 1,
-                        type: 'dashed'
-                    },
-                    showSymbol: false
-                });
-                
-                legendData.push(`${chartData.symbol} 实际价格`);
-                legendData.push(`${chartData.symbol} 拟合价格`);
-            });
-            
-            const priceOption = {
-                title: {
-                    text: '价格走势对比',
-                    subtext: '实际价格 vs 拟合价格',
-                    left: 'center'
-                },
-                tooltip: {
-                    trigger: 'axis',
-                    axisPointer: {
-                        type: 'cross',
-                        label: {
-                            backgroundColor: '#6a7985'
-                        }
-                    },
-                    formatter: function(params) {
-                        const date = params[0].axisValue;
-                        let result = `<div style="font-weight: bold; margin-bottom: 5px;">${date}</div>`;
-                        params.forEach(param => {
-                            if (param.value && param.value[1] !== null && param.value[1] !== undefined) {
-                                result += `<div style="display: flex; align-items: center; margin: 2px 0;">
-                                    <span style="display: inline-block; width: 10px; height: 10px; background: ${param.color}; margin-right: 5px; border-radius: 50%;"></span>
-                                    <span style="margin-right: 10px;">${param.seriesName}:</span>
-                                    <span style="font-weight: bold;">${param.value[1].toFixed(4)}</span>
-                                </div>`;
-                            }
-                        });
-                        return result;
-                    }
-                },
-                legend: {
-                    data: legendData,
-                    top: '10%',
-                    type: 'scroll', // 滚动类型，适应大量图例
-                    orient: 'horizontal'
-                },
-                grid: {
-                    left: '3%',
-                    right: '4%',
-                    bottom: '3%',
-                    top: '20%',
-                    containLabel: true
-                },
-                xAxis: {
-                    type: 'time',
-                    boundaryGap: false,
-                    axisLabel: {
-                        formatter: function(value) {
-                            const date = new Date(value);
-                            const year = date.getFullYear();
-                            const month = date.getMonth() + 1;
-                            const day = date.getDate();
-                            return `${year}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}`;
-                        }
-                    }
-                },
-                yAxis: {
-                    type: 'value',
-                    name: '价格'
-                },
-                series: priceSeries,
-                dataZoom: [
-                    {
-                        type: 'inside',
-                        start: 0,
-                        end: 100
-                    },
-                    {
-                        start: 0,
-                        end: 100
-                    }
-                ]
-            };
-            
-            priceChart.setOption(priceOption);
-            
-            // 处理窗口大小变化
-            const priceHandleResize = () => {
-                if (priceChart && typeof priceChart.resize === 'function') {
-                    priceChart.resize();
-                }
-            };
-            window.addEventListener('resize', priceHandleResize);
-        }
-        
-        // 创建残差分析图表 - 支持多条线
-        const residualChartDom = document.getElementById('residual-analysis-chart');
-        if (residualChartDom) {
-            const residualChart = echarts.init(residualChartDom);
-            
-            // 构建残差数据
-            let residualSeries = [];
-            let residualLegendData = [];
-            
-            allChartData.forEach((chartData, index) => {
-                // 残差线
-                residualSeries.push({
-                    name: `${chartData.symbol} 残差`,
-                    type: 'line',
-                    data: chartData.dates.map((dateStr, i) => {
-                        const dateParts = dateStr.split('-');
-                        const timestamp = new Date(Date.UTC(dateParts[0], dateParts[1] - 1, dateParts[2])).getTime();
-                        return [timestamp, chartData.residuals[i]];
-                    }),
-                    smooth: true,
-                    lineStyle: {
-                        color: getColorByIndex(index),
-                        width: 1
-                    },
-                    showSymbol: false
-                });
-                
-                residualLegendData.push(`${chartData.symbol} 残差`);
-            });
-            
-            // 添加零线
-            if (allChartData.length > 0) {
-                const firstChart = allChartData[0];
-                residualSeries.push({
-                    name: '零线',
-                    type: 'line',
-                    data: firstChart.dates.map((dateStr, i) => {
-                        const dateParts = dateStr.split('-');
-                        const timestamp = new Date(Date.UTC(dateParts[0], dateParts[1] - 1, dateParts[2])).getTime();
-                        return [timestamp, 0];
-                    }),
-                    lineStyle: {
-                        color: '#000',
-                        type: 'dashed',
-                        width: 1
-                    },
-                    showSymbol: false,
-                    silent: true
-                });
-                residualLegendData.push('零线');
-            }
-            
-            const residualOption = {
-                title: {
-                    text: '拟合残差分析',
-                    subtext: '残差 vs 时间',
-                    left: 'center'
-                },
-                tooltip: {
-                    trigger: 'axis',
-                    axisPointer: {
-                        type: 'cross',
-                        label: {
-                            backgroundColor: '#6a7985'
-                        }
-                    },
-                    formatter: function(params) {
-                        const date = params[0].axisValue;
-                        let result = `<div style="font-weight: bold; margin-bottom: 5px;">${date}</div>`;
-                        params.forEach(param => {
-                            if (param.value && param.value[1] !== null && param.value[1] !== undefined) {
-                                result += `<div style="display: flex; align-items: center; margin: 2px 0;">
-                                    <span style="display: inline-block; width: 10px; height: 10px; background: ${param.color}; margin-right: 5px; border-radius: 50%;"></span>
-                                    <span style="margin-right: 10px;">${param.seriesName}:</span>
-                                    <span style="font-weight: bold;">${param.value[1].toFixed(6)}</span>
-                                </div>`;
-                            }
-                        });
-                        return result;
-                    }
-                },
-                legend: {
-                    data: residualLegendData,
-                    top: '10%',
-                    type: 'scroll', // 滚动类型，适应大量图例
-                    orient: 'horizontal'
-                },
-                grid: {
-                    left: '3%',
-                    right: '4%',
-                    bottom: '3%',
-                    top: '20%',
-                    containLabel: true
-                },
-                xAxis: {
-                    type: 'time',
-                    boundaryGap: false,
-                    axisLabel: {
-                        formatter: function(value) {
-                            const date = new Date(value);
-                            const year = date.getFullYear();
-                            const month = date.getMonth() + 1;
-                            const day = date.getDate();
-                            return `${year}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}`;
-                        }
-                    }
-                },
-                yAxis: {
-                    type: 'value',
-                    name: '残差',
-                    markLine: {
-                        data: [
-                            { yAxis: thresholdPlus, name: '+80%', lineStyle: { color: '#ff0000', width: 2 } },
-                            { yAxis: thresholdMinus, name: '-80%', lineStyle: { color: '#ff0000', width: 2 } }
-                        ],
-                        symbol: 'none'
-                    }
-                },
-                series: residualSeries,
-                dataZoom: [
-                    {
-                        type: 'inside',
-                        start: 0,
-                        end: 100
-                    },
-                    {
-                        start: 0,
-                        end: 100
-                    }
-                ]
-            };
-            
-            residualChart.setOption(residualOption);
-            
-            // 处理窗口大小变化
-            const residualHandleResize = () => {
-                if (residualChart && typeof residualChart.resize === 'function') {
-                    residualChart.resize();
-                }
-            };
-            window.addEventListener('resize', residualHandleResize);
-        }
-        
-        console.log("双ECharts可视化创建成功，包含", allChartData.length, "个指数的数据");
-    } else {
-        console.log("没有可用的残差数据进行可视化");
-        $('#lppl-visualization-container').html('<div style="display: flex; align-items: center; justify-content: center; height: 100%; color: #999;">无可用的残差数据进行可视化</div>');
-    }
-}
-
-// 辅助函数：根据索引获取不同颜色
-function getColorByIndex(index) {
-    const colors = [
-        '#5470c6', '#fac858', '#ee6666', '#73c0de', '#3ba272',
-        '#fc8452', '#9a60b4', '#ea7ccc', '#5933ab', '#3358ab',
-        '#ab333a', '#ab8c33', '#33ab54', '#338aab', '#8a33ab'
-    ];
-    return colors[index % colors.length];
-}
-
-// 在页面加载完成后初始化LPPL分析功能
-$(document).ready(function() {
-    // 等待指数页面完全加载后初始化
-    setTimeout(function() {
-        initializeLpplAnalysis();
-    }, 2000); // 延迟2秒确保页面完全加载
-});
-
-console.log('LPPL分析模块已加载');

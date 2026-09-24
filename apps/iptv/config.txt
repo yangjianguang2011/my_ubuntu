@@ -1,8 +1,9 @@
 ﻿Category	Channels	Playlist
-iptv	10	http://www.yourdomain.cn:4600/tvbox/iptv.m3u
-ipv4  10  https://live.zbds.top/tv/iptv4.m3u
-ftindy 10 https://raw.githubusercontent.com/Ftindy/IPTV-URL/main/IPV6.m3u
-#########
+#iptv	10  http://your-iptv-host:4200/m3u
+burning 10  https://iptv.burningc4.com/TV-IPV4.m3u
+ipv4    10  https://live.zbds.top/tv/iptv4.m3u
+#ftindy  10  https://raw.githubusercontent.com/Ftindy/IPTV-URL/main/IPV6.m3u
+######https://github.com/iptv-org/iptv
 Animation	63	https://iptv-org.github.io/iptv/categories/animation.m3u
 Auto	14	https://iptv-org.github.io/iptv/categories/auto.m3u
 Business	72	https://iptv-org.github.io/iptv/categories/business.m3u

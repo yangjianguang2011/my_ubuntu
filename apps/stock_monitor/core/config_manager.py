@@ -230,27 +230,19 @@ class ConfigManager:
         self.notify_observers("settings_update", updates)
 
     def get_check_interval(self):
-        """获取检查间隔"""
-        settings = self.get_settings()
-        return settings.get("check_interval", 180)  # 默认3分钟
+        """检查间隔（秒）—— 读 `config.ini [stock_monitor] check_interval`。
 
-    def set_check_interval(self, interval):
-        """设置检查间隔"""
-        self.update_settings({"check_interval": interval})
+        注：原存在 SQLite 的 `system_settings` 表里、可在页面上改；
+        该设置极少变动，已统一放配置文件（页面上不再提供修改入口）。
+        """
+        return int(get_path("stock_monitor", "check_interval", 180))
 
     def get_market_times(self):
-        """获取开市时间设置"""
-        settings = self.get_settings()
+        """开市时段 —— 读 `config.ini [stock_monitor] market_open_start/_end`。"""
         return {
-            "market_open_start": settings.get("market_open_start", "09:30"),
-            "market_open_end": settings.get("market_open_end", "16:00"),
+            "market_open_start": get_path("stock_monitor", "market_open_start", "09:30"),
+            "market_open_end": get_path("stock_monitor", "market_open_end", "16:00"),
         }
-
-    def set_market_times(self, open_time, close_time):
-        """设置开市时间"""
-        self.update_settings(
-            {"market_open_start": open_time, "market_open_end": close_time}
-        )
 
     def get_global_notification_enabled(self):
         """获取全局通知开关状态"""
@@ -544,20 +536,16 @@ def set_stock_notification_enabled(stock_code, enabled):
     config_manager.set_stock_notification_enabled(stock_code, enabled)
 
 
-def get_industry_page_enabled():
-    """获取行业页面开关状态"""
-    settings = config_manager.get_settings()
-    return settings.get("industry_page_enabled", False)
+# 行业页已下线：原 get_industry_page_enabled() 一并移除（2026-09-21）
 
 
 if __name__ == "__main__":
     # 测试配置管理系统功能
     logger.info("测试配置管理系统...")
 
-    # 测试系统设置
-    config_manager.set_check_interval(300)
-    interval = config_manager.get_check_interval()
-    logger.info(f"检查间隔: {interval}")
+    # 读取设置（现来自 config.ini）
+    logger.info(f"检查间隔: {config_manager.get_check_interval()}")
+    logger.info(f"开市时段: {config_manager.get_market_times()}")
 
     # 测试全局通知开关
     set_global_notification_enabled(True)

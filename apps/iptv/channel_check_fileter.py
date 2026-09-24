@@ -51,25 +51,25 @@ def check_program_list(file_path, ffmpeg_path):
     with open(file_path, 'r', encoding='utf-8', errors='ignore') as file,\
          open(ok_file, 'w', encoding='utf-8') as ok_f,\
          open(fail_file, 'w', encoding='utf-8') as fail_f:
-        
+
         tvid, addr = None, None
         for line in file:
             line = line.strip()
 
             if not line:
-            	continue
+                continue
             if line.startswith('#EXTM3U'):
-                    ok_f.write(line)
-                    fail_f.write(line)
-                    continue
+                ok_f.write(line)
+                fail_f.write(line)
+                continue
 
             if file_ext == '.m3u' and line.startswith("#EXTINF:"):
                 tvid = line
                 continue
-            
-            if line.startswith(('http', 'rtmp', 'rtp','https')):
+
+            if line.startswith(('http', 'rtmp', 'rtp', 'https')):
                 addr = line
-            
+
             if tvid and addr:
                 tvname = extract_tvname(tvid)
                 print(f"Checking {tvname} ({addr})...")
@@ -97,9 +97,9 @@ if __name__ == "__main__":
     if not is_ffmpeg_installed(ffmpeg_path):
         print("FFmpeg is not installed or path is incorrect.")
         sys.exit(1)
-    
+
     if len(sys.argv) != 2:
         print("Usage: python script.py <inputfile>")
         sys.exit(1)
-    
+
     check_program_list(sys.argv[1], ffmpeg_path)

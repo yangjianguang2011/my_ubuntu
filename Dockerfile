@@ -38,7 +38,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
     libxrender-dev \
     nginx=1.18.0* \
     supervisor \
-    # OpenClaw 浏览器依赖
+    # 浏览器（Chrome/selenium）依赖：xueqiu_api 与 OpenClaw 共用
     xvfb \
     libx11-xcb1 \
     libxcomposite1 \
@@ -48,11 +48,20 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
     libxtst6 \
     libnss3 \
     libnspr4 \
+    fonts-wqy-zenhei \
+    fonts-wqy-microhei \
     && rm -rf /var/lib/apt/lists/*
 
-# 3. 安装 Node.js 和 OpenClaw
-RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt-get install -y nodejs
-RUN npm install -g openclaw@latest
+# 3. 可选：安装 Node.js 和 OpenClaw（默认关闭，代码保留）
+#    打开方式：ENABLE_OPENCLAW=1（compose 的 build.args / environment，或 --build-arg）
+ARG ENABLE_OPENCLAW=0
+RUN if [ "$ENABLE_OPENCLAW" = "1" ]; then \
+        curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
+        apt-get install -y nodejs && \
+        npm install -g openclaw@latest; \
+    else \
+        echo "OpenClaw disabled (ENABLE_OPENCLAW=$ENABLE_OPENCLAW), skip Node.js/openclaw"; \
+    fi
 
 # 4. 安装 Chrome 相关
 RUN wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | apt-key add - && \
@@ -62,7 +71,7 @@ RUN wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | apt-key add
     pip3 install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple webdriver-manager && \
     python3 -c "from webdriver_manager.chrome import ChromeDriverManager; import subprocess; subprocess.run(['cp', ChromeDriverManager().install(), '/usr/local/bin/chromedriver']); subprocess.run(['chmod', '+x', '/usr/local/bin/chromedriver'])"
 
-# 5. 安装 Tesseract OCR（用于图片文字识别，可选）
+# 5. 安装 Tesseract OCR（用于图片文字识别，可选，默认关闭）
 #RUN apt-get update && apt-get install -y tesseract-ocr tesseract-ocr-chi-sim
 #RUN pip3 install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple \
 #    paddlepaddle==3.2.2 \
@@ -90,10 +99,10 @@ COPY ./apps/news/requirements.txt /tmp/news_requirements.txt
 RUN pip3 install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple -r /tmp/news_requirements.txt && rm /tmp/news_requirements.txt
 
 # 8. 复制配置文件（应用配置放到 /root/apps 下）
+#    说明：config.ini 为私人配置、不入库；本步骤依赖构建机上存在该文件。
+#    后续可改为运行时挂载（见 README）。
 COPY ./apps/config.ini /root/apps/config.ini
-COPY ./apps/config.sh /root/apps/config.sh
 COPY ./apps/config.py /root/apps/config.py
-RUN chmod +x /root/apps/config.sh
 
 # 9. 复制代码文件
 # Nginx 配置（系统配置）
@@ -104,7 +113,10 @@ COPY ./configs/nginx.conf /etc/nginx/nginx.conf
 COPY ./apps/iptv /root/apps/iptv
 COPY ./apps/news /root/apps/news
 COPY ./apps/stock_monitor /root/apps/stock_monitor
-COPY ./apps/crawlers /root/apps/crawlers
+# 首页模板：私有 index.html 不入库/不进镜像，用 example 生成（.dockerignore 已排除 index.html）
+COPY ./apps/stock_monitor/web_templates/index.html.example /root/apps/stock_monitor/web_templates/index.html
+COPY ./apps/xueqiu_api /root/apps/xueqiu_api
+COPY ./apps/eastmoney /root/apps/eastmoney
 
 # 10. 创建目录结构
 RUN mkdir -p /data/xueqiu_data && \
@@ -123,19 +135,14 @@ RUN mkdir -p /data/xueqiu_data && \
 RUN chmod +x \
     /root/apps/iptv/download_m3u.py \
     /root/apps/news/run.sh \
-    /root/apps/crawlers/eastmoney/run_eastmoney.sh \
-    /root/apps/crawlers/xueqiu/run_xueqiu.sh
+    /root/apps/eastmoney/run_eastmoney.sh \
+    /root/apps/xueqiu_api/run_xueqiu.sh
 
-# 12. 配置 Cron 作业
-COPY <<EOF /etc/cron.d/myjobs
-0 */8 * * * root cd /root/apps/news && /bin/bash run.sh >> /var/log/cron/news.log 2>&1
-5 23 * * * root cd /root/apps/iptv && /usr/bin/python3 download_m3u.py >> /var/log/cron/iptv.log 2>&1
-10 23 * * * root cd /root/apps/crawlers/xueqiu && /bin/bash run_xueqiu.sh >> /var/log/cron/xueqiu.log 2>&1
-40 23 * * * root cd /root/apps/crawlers/eastmoney && /bin/bash run_eastmoney.sh >> /var/log/cron/eastmoney.log 2>&1
-EOF
+# 12. 配置 Cron 作业（独立文件，避免 heredoc 对 BuildKit 的依赖）
+COPY ./configs/cron.d/myjobs /etc/cron.d/myjobs
 RUN chmod 0644 /etc/cron.d/myjobs
 
-# 14. 暴露端口（添加 OpenClaw 端口）
+# 14. 暴露端口（38789 供 OpenClaw 使用，默认关闭）
 EXPOSE 80 4422 5001 38789
 
 # 15. 复制启动脚本

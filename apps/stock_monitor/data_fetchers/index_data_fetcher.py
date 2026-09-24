@@ -138,49 +138,68 @@ SINA_ALL_INDEX = [
     {"symbol": "sz399997", "name": "中证白酒", "interface": "sina"},
 ]
 
+# 大盘指数·**真实估值组**（乐咕 legulegu 有真实 PE/PB）：在列表中恒排最前、与行业/主题指数区分。
+# 顺序即展示优先级。若 SINA_ALL_INDEX 中缺某只，自动补到清单最前。
+REAL_VALUATION_INDEXES = [
+    ("sz399300", "沪深300"),
+    ("sh000016", "上证50"),
+    ("sh000905", "中证500"),
+    ("sh000852", "中证1000"),
+    ("sz399673", "创业板50"),
+    ("sh000010", "上证180"),
+]
+_REAL_SYMBOLS = {s for s, _ in REAL_VALUATION_INDEXES}
+
+
+def _ensure_real_indexes_in_list() -> None:
+    """确保真实估值大盘指数都在 SINA_ALL_INDEX 中（缺则补到最前）。"""
+    have = {idx["symbol"] for idx in SINA_ALL_INDEX}
+    prepend = [{"symbol": s, "name": n, "interface": "sina"}
+               for s, n in REAL_VALUATION_INDEXES if s not in have]
+    if prepend:
+        SINA_ALL_INDEX[:0] = prepend
+        logger.info(f"指数清单补充真实估值大盘指数: {[p['name'] for p in prepend]}")
+
+
+_ensure_real_indexes_in_list()
+
 # 创建指数代码到名称的映射，提高查找效率
 INDEX_SYMBOL_TO_NAME_MAP = {idx["symbol"]: idx["name"] for idx in SINA_ALL_INDEX}
 
 
+def index_group(symbol: str) -> str:
+    """指数分组标签：大盘指数(真实估值) / 行业主题(估算)。"""
+    return "大盘指数(真实估值)" if symbol in _REAL_SYMBOLS else "行业主题(估算)"
+
+# 乐咕乐股（legulegu）**真实**指数估值覆盖范围（月频，含滚动市盈率/市净率）。
+# 仅这些大盘指数有第三方权威 PE/PB；其余行业/主题指数无公开估值源，
+# 页面回退到"价格缩放估算"（estimate_*，非真实估值，`valuation_source` 会标注）。
+_LG_INDEX_NAME = {
+    "sh000016": "上证50",
+    "sh000300": "沪深300", "sz399300": "沪深300",
+    "sh000905": "中证500", "sz399905": "中证500",
+    "sh000852": "中证1000", "sz399852": "中证1000",
+    "sz399673": "创业板50",
+    "sh000010": "上证180",
+}
+
+
 def get_index_dynamic_list(top_n=28, cache_duration=86400):
-    """
-    获取动态选择的主要指数（前N名+沪深300）
-    使用天级别缓存
-    """
-    cache_key = f"dynamic_selected_indices_{top_n}"
+    """动态指数列表：**大盘指数(真实估值)恒包含并置顶** + 其余按涨幅取前 N。
 
-    # 尝试从缓存获取数据
+    （旧实现硬编码"沪深300 预留 1 位"，且 `sz300_data` 可能为 None 会污染列表；已重写。）
+    """
+    cache_key = f"dynamic_selected_indices_v4_{top_n}"
     cached_data = get_index_cached_data(cache_key)
-    if (
-        cached_data is not None
-        and isinstance(cached_data, list)
-        and len(cached_data) > 0
-    ):
-        logger.info(f"从缓存获取动态选择的指数列表（前{top_n}名+沪深300）")
+    if isinstance(cached_data, list) and cached_data:
         return cached_data
-
     try:
-        # 获取最近 30 天排名
-        top_ranking = get_index_ranking(period_days=30)
-
-        # 检查沪深 300 是否在排名中
-        sz300_data = next(
-            (idx for idx in top_ranking if idx["symbol"] == "sz399300"), None
-        )
-
-        # 先取前 top_n-1 名（为沪深 300 预留位置）
-        top_indices = top_ranking[: top_n - 1]
-        sz300_in_top = any(idx["symbol"] == "sz399300" for idx in top_indices)
-
-        if not sz300_in_top:
-            result = list(top_indices) + [sz300_data]
-        else:
-            result = list(top_indices)
-
+        ranking = get_index_ranking(period_days=30)
+        real = [x for x in ranking if x["symbol"] in _REAL_SYMBOLS]
+        rest = [x for x in ranking if x["symbol"] not in _REAL_SYMBOLS]
+        result = real + rest[:max(0, top_n)]
         set_index_cache_data(cache_key, result, cache_duration=cache_duration)
-        logger.info(
-            f"成功获取并缓存动态选择的 {len(result)} 个指数数据（包含沪深 300）"
-        )
+        logger.info(f"动态指数列表：大盘指数 {len(real)} + 其余 {len(result)-len(real)} = {len(result)}")
         return result
     except Exception as e:
         logger.error(f"获取动态选择指数失败：{e}")
@@ -276,23 +295,12 @@ def get_index_history(symbol: str, period: str = "12M"):
 
     try:
         df = get_index_daily_data(symbol)
+        if df is None or df.empty:
+            logger.warning(f"指数 {symbol} 无日线数据")
+            return []
 
-        # 如果是中文列名，转换为英文
-        if "日期" in df.columns:
-            df.rename(
-                columns={
-                    "日期": "date",
-                    "开盘": "open",
-                    "收盘": "close",
-                    "最高": "high",
-                    "最低": "low",
-                    "成交量": "volume",
-                    "成交额": "amount",
-                },
-                inplace=True,
-            )
-        # 确保所需的列存在
-        required_columns = ["date", "open", "close", "high", "low", "volume", "amount"]
+        # 新浪指数日线字段：date/open/high/low/close/volume（无 amount，故成交额恒缺）
+        required_columns = ["date", "open", "close", "high", "low", "volume"]
         for col in required_columns:
             if col not in df.columns:
                 df[col] = 0 if col != "date" else pd.NaT
@@ -319,7 +327,8 @@ def get_index_history(symbol: str, period: str = "12M"):
         df = df[df["date"] >= start_date]
         df = df.sort_values("date")
 
-        # 转换为字典列表格式
+        # 转换为字典列表格式（amount 新浪指数日线不提供，缺则记 0）
+        has_amount = "amount" in df.columns
         result = []
         for _, row in df.iterrows():
             item = {
@@ -329,7 +338,8 @@ def get_index_history(symbol: str, period: str = "12M"):
                 "high": float(row["high"]) if pd.notna(row["high"]) else 0.0,
                 "low": float(row["low"]) if pd.notna(row["low"]) else 0.0,
                 "volume": int(row["volume"]) if pd.notna(row["volume"]) else 0,
-                "amount": float(row["amount"]) if pd.notna(row["amount"]) else 0.0,
+                "amount": (float(row["amount"]) if has_amount and pd.notna(row["amount"])
+                           else 0.0),
             }
             result.append(item)
 
@@ -351,7 +361,7 @@ def get_index_ranking(period_days=30):
     logger.info(f"开始获取指数排名（优化版），周期: {period_days}天")
 
     # 缓存键
-    cache_key = f"index_ranking_main_optimized_{period_days}"
+    cache_key = f"index_ranking_main_optimized_v3_{period_days}"
 
     # 尝试从缓存获取数据
     cached_data = get_index_cached_data(cache_key)
@@ -399,22 +409,20 @@ def get_index_ranking(period_days=30):
 
             if start_price is not None and start_price != 0:
                 change_percent = ((latest_close - start_price) / start_price) * 100
-
-                # 获取估值数据
-                enhanced_data = get_enhanced_index_data(symbol)
-
+                # 注意：估值字段不在此处计算（原先对每只指数调用 get_enhanced_index_data，
+                # 与 get_detailed_index_ranking 重复且昂贵）。需要估值请走 detailed_ranking。
                 return {
                     "symbol": symbol,
                     "name": name,
                     "current_price": latest_close,
                     "change_percent": round(change_percent, 2),
                     "change_amount": round(latest_close - start_price, 2),
-                    "volume": 0,  # 历史周期数据无法获得累计成交量
-                    "amount": 0.0,  # 历史周期数据无法获得累计成交额
-                    "pe": enhanced_data.get("pe"),
-                    "pb": enhanced_data.get("pb"),
-                    "pe_percentile": enhanced_data.get("pe_percentile"),
-                    "pb_percentile": enhanced_data.get("pb_percentile"),
+                    "volume": 0,  # 指数日线（新浪）无成交量/额，见 get_index_history 说明
+                    "amount": 0.0,
+                    "pe": None,
+                    "pb": None,
+                    "pe_percentile": None,
+                    "pb_percentile": None,
                 }
             return None
 
@@ -455,6 +463,12 @@ def get_index_ranking(period_days=30):
                 f"排名 {i+1}: {item['name']} ({item['symbol']}) 涨跌幅: {item['change_percent']}%"
             )
 
+        # 分组字段在此**统一给出**（唯一来源）：/api/index/ranking 与 /api/index/dynamic_list
+        # 都由本函数派生，前端只认 `index_group`，不再自带硬编码符号表。
+        for item in ranking_list:
+            item["is_real_valuation"] = item["symbol"] in _REAL_SYMBOLS
+            item["index_group"] = index_group(item["symbol"])
+
         set_index_cache_data(cache_key, ranking_list)
         logger.info(
             f"成功获取并缓存 {len(ranking_list)} 个指数的排名数据（优化版，{period_days}天周期）"
@@ -484,7 +498,7 @@ def get_detailed_index_ranking(period_days=30, include_valuation=True):
     logger.info(f"开始获取详细指数排名（包含估值），周期: {period_days}天")
 
     # 缓存键
-    cache_key = f"detailed_index_ranking_{period_days}_{include_valuation}"
+    cache_key = f"detailed_index_ranking_v8_{period_days}_{include_valuation}"
 
     # 尝试从缓存获取数据
     cached_data = get_index_cached_data(cache_key)
@@ -501,24 +515,48 @@ def get_detailed_index_ranking(period_days=30, include_valuation=True):
         basic_ranking = get_index_ranking(period_days)
 
         if include_valuation:
-            # 为每个指数补充估值数据
+            # 为每个指数补充估值数据（真实优先，见 get_enhanced_index_data）
             for item in basic_ranking:
                 symbol = item["symbol"]
                 enhanced_data = get_enhanced_index_data(symbol)
-
-                # 更新估值信息
                 item["pe"] = enhanced_data.get("pe")
                 item["pb"] = enhanced_data.get("pb")
                 item["pe_percentile"] = enhanced_data.get("pe_percentile")
                 item["pb_percentile"] = enhanced_data.get("pb_percentile")
+                item["valuation_source"] = enhanced_data.get("valuation_source")
                 item["valuation_status"] = _get_valuation_status(
                     enhanced_data.get("pe_percentile"),
                     enhanced_data.get("pb_percentile"),
                 )
 
-        set_index_cache_data(cache_key, basic_ranking)
-        logger.info(f"成功获取并缓存 {len(basic_ranking)} 个指数的详细排名数据")
-        return basic_ranking
+        # 分组与展示顺序：大盘指数(真实估值)恒排最前，其余按涨幅；组内保持涨幅排序
+        # （`is_real_valuation`/`index_group` 的**权威来源**是 `get_index_ranking`；
+        #   这里再断言一次，防止读到缺字段的旧缓存导致分组/置顶失效）
+        for item in basic_ranking:
+            item["is_real_valuation"] = item["symbol"] in _REAL_SYMBOLS
+            item["index_group"] = index_group(item["symbol"])
+        _real = [x for x in basic_ranking if x["is_real_valuation"]]
+        _rest = [x for x in basic_ranking if not x["is_real_valuation"]]
+        ranking_out = _real + _rest
+        for i, item in enumerate(ranking_out):
+            item["display_order"] = i
+
+        # 大盘指数若**仍有回退到估算**的（乐咕真实估值后台补齐中），只缓存 10 分钟以便尽快刷新；
+        # 否则默认 24h。注：`get_enhanced_index_data` 内层也有 600s 逻辑，但若外层缓存 24h
+        # 会把内层的快速刷新完全盖住 → 大盘指数会卡在"估算"最长一天。
+        _fallback = any(
+            x["symbol"] in _REAL_SYMBOLS
+            and str(x.get("valuation_source") or "").startswith("estimate")
+            for x in ranking_out
+        )
+        set_index_cache_data(cache_key, ranking_out,
+                             cache_duration=600 if _fallback else None)
+        logger.info(
+            f"成功获取并缓存 {len(ranking_out)} 个指数的详细排名"
+            f"（大盘指数真实估值 {len(_real)} 个置顶；"
+            f"{'存在估算回退，缓存 600s' if _fallback else '全部就绪，缓存默认时长'}）"
+        )
+        return ranking_out
     except Exception as e:
         logger.error(f"获取详细指数排名失败: {e}", exc_info=True)
         # 返回缓存的数据
@@ -587,7 +625,7 @@ def get_multiple_index_history(symbols: List[str], period: str = "12M"):
     :param symbols: 指数代码列表
     :param period: 时间周期
     """
-    cache_key = f"multiple_index_history_{','.join(sorted(symbols))}_{period}"
+    cache_key = f"multiple_index_history_v3_{','.join(sorted(symbols))}_{period}"
 
     # 尝试从缓存获取数据
     cached_data = get_index_cached_data(cache_key)
@@ -661,159 +699,129 @@ def calculate_growth_rate(history_data: List[Dict], base_date: Optional[str] = N
     return growth_data
 
 
-def get_index_valuation_data(symbol: str):
-    """
-    获取指定指数的估值数据（PE、PB等）
-    :param symbol: 指数代码
-    :return: 包含估值信息的字典
-    """
-    cache_key = f"index_valuation_data_{symbol}"
-
-    # 尝试从缓存获取数据
-    cached_data = get_index_cached_data(cache_key)
-    if cached_data is not None and isinstance(cached_data, dict):
-        logger.info(f"从缓存获取指数估值数据: {symbol}")
-        return cached_data
-
-    try:
-        # 获取中证指数估值数据
-        valuation_data = ak.stock_zh_index_value_csindex(
-            symbol=symbol.replace("sh", "").replace("sz", "")
-        )
-
-        if valuation_data.empty:
-            logger.warning(f"未获取到指数 {symbol} 的估值数据")
-            return {}
-
-        # 获取最新的估值数据
-        latest_valuation = valuation_data.iloc[0].to_dict()
-
-        # 缓存数据
-        set_index_cache_data(cache_key, latest_valuation)
-        logger.info(f"获取到指数 {symbol} 的估值数据并存入缓存")
-        return latest_valuation
-    except Exception as e:
-        logger.error(f"获取指数估值数据失败 {symbol}: {e}")
-        return {}
-
-
-def calculate_valuation_percentile(
-    symbol: str, valuation_type: str = "pe", period: int = 10
-):
-    """
-    计算指数估值百分位数（基于历史价格数据自主计算）
-    :param symbol: 指数代码
-    :param valuation_type: 估值类型 ('pe' 或 'pb')
-    :param period: 计算百分位数的时间周期（年）
-    :return: 百分位数值
-    """
-    cache_key = f"index_valuation_percentile_{symbol}_{valuation_type}_{period}"
-
-    # 尝试从缓存获取数据
-    cached_data = get_index_cached_data(cache_key)
-    if cached_data is not None and isinstance(cached_data, (int, float)):
-        logger.info(f"从缓存获取指数估值百分位数: {symbol} - {valuation_type}")
-        return cached_data
-
-    try:
-        # 获取指数的历史价格数据
-        history_data = get_index_history(symbol, period=f"{period}Y")
-
-        if not history_data or len(history_data) < 2:
-            logger.warning(
-                f"指数 {symbol} 历史数据不足，无法计算{valuation_type}百分位数"
-            )
-            return None
-
-        # 将历史数据转换为DataFrame
-        df = pd.DataFrame(history_data)
-        df["date"] = pd.to_datetime(df["date"])
-
-        # 按日期排序
-        df = df.sort_values("date").reset_index(drop=True)
-
-        # 计算估值序列（这里需要估算财务数据）
-        # 由于无法直接获取财务数据，我们使用简化的估算方法
-        # 假设PE和PB在短期内变化不大，使用历史平均值作为参考
-
-        # 获取当前价格
-        current_price = df["close"].iloc[-1] if len(df) > 0 else None
-
-        if current_price is None:
-            logger.warning(f"无法获取 {symbol} 当前价格")
-            return None
-
-        # 估算历史估值序列（简化模型）
-        # 使用历史数据来估算财务指标
-        if valuation_type.lower() == "pe":
-            # 估算历史PE序列
-            # 假设过去某个时期的平均PE作为参考，然后反推当前PE
-            # 这里我们使用一个简化的模型：基于历史价格波动来估算PE变化
-            pe_history = estimate_historical_pe(symbol, df, period)
-        elif valuation_type.lower() == "pb":
-            # 估算历史PB序列
-            pb_history = estimate_historical_pb(symbol, df, period)
-        else:
-            raise ValueError(f"不支持的估值类型: {valuation_type}")
-
-        # 根据估值类型获取历史估值数据
-        if valuation_type.lower() == "pe":
-            if pe_history is None or len(pe_history) < 2:
-                logger.warning(f"无法估算 {symbol} 的历史PE数据")
-                return None
-            historical_values = pd.Series(pe_history).dropna()
-        else:  # pb
-            if pb_history is None or len(pb_history) < 2:
-                logger.warning(f"无法估算 {symbol} 的历史PB数据")
-                return None
-            historical_values = pd.Series(pb_history).dropna()
-
-        if len(historical_values) < 2:
-            logger.warning(
-                f"指数 {symbol} 历史{valuation_type}数据不足，无法计算百分位数: {len(historical_values)} 条"
-            )
-            return None
-
-        # 获取当前估值（最后一个值）
-        current_valuation = historical_values.iloc[-1]
-
-        if pd.isna(current_valuation):
-            logger.warning(
-                f"指数 {symbol} 当前{valuation_type}值无效: {current_valuation}"
-            )
-            return None
-
-        # 计算当前估值在历史分布中的百分位数
-        # 百分位数 = (小于等于当前值的数量 / 总数量) * 100
-        percentile = (
-            (historical_values <= current_valuation).sum()
-            / len(historical_values)
-            * 100
-        )
-
-        # 缓存数据
-        set_index_cache_data(cache_key, float(percentile))
-        logger.info(
-            f"计算指数 {symbol} {valuation_type}百分位数: {percentile:.2f}% (基于{len(historical_values)}条数据)"
-        )
-        return float(percentile)
-    except Exception as e:
-        logger.error(f"计算指数估值百分位数失败 {symbol} - {valuation_type}: {e}")
-        import traceback
-
-        traceback.print_exc()
+def _series_percentile(series, years: int = 10) -> Optional[float]:
+    """序列末端值在近 years 年（月频≈12点/年）中的百分位（0~100）。"""
+    s = pd.Series(series).dropna()
+    if len(s) < 2:
         return None
+    win = s.tail(years * 12 + 1) if len(s) > years * 12 else s
+    return float((win <= win.iloc[-1]).mean() * 100)
+
+
+_LG_FAIL_COOLDOWN = 600           # 单只失败后的冷却秒数（逐只，避免一只失败拖累全部）
+_LG_MIN_INTERVAL = 2.0            # 两次 HTTP 调用最小间隔（秒）
+_LG_LAST_CALL = {"ts": 0.0}
+_LG_FAIL_TS: Dict[str, float] = {}
+
+
+def _lg_throttle() -> None:
+    """确保乐咕两次 HTTP 调用间隔 ≥ _LG_MIN_INTERVAL。"""
+    import time as _t
+    wait = _LG_MIN_INTERVAL - (_t.time() - _LG_LAST_CALL["ts"])
+    if wait > 0:
+        _t.sleep(wait)
+    _LG_LAST_CALL["ts"] = _t.time()
+
+
+def _lg_fetch(fn, name: str, attempts: int = 3):
+    """带重试/退避地调用一次乐咕接口；失败返回 None。"""
+    import time as _t
+    for i in range(attempts):
+        try:
+            _lg_throttle()
+            df = fn(symbol=name)
+            if df is not None and not df.empty:
+                return df
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"乐咕接口失败 {name} 第{i+1}/{attempts}次: {type(e).__name__}")
+        _t.sleep(1.5 * (i + 1))
+    return None
+
+
+def _valuation_from_legulegu(symbol: str, years: int = 10, allow_fetch: bool = True) -> Dict:
+    """真实指数估值（乐咕乐股 legulegu，**月频**，含滚动市盈率 TTM 与市净率）。
+
+    仅覆盖少数大盘指数（见 `_LG_INDEX_NAME`）；其余指数返回 {}。
+    `allow_fetch=False` 时**只读缓存、不发起网络请求**（供页面请求路径使用，避免阻塞；
+    缺失值由 `warm_real_valuations()` 在后台线程补齐）。
+    抗限流：请求间节流、逐只重试、逐只失败冷却；PE/PB 允许部分成功。
+    """
+    name = _LG_INDEX_NAME.get(symbol)
+    if not name:
+        return {}
+    cache_key = f"index_val_lg_v6_{symbol}"
+    cached = get_index_cached_data(cache_key)
+    if isinstance(cached, dict) and cached.get("pe") is not None and cached.get("pb") is not None:
+        return cached
+    if not allow_fetch:
+        return {}   # 页面路径：不阻塞，交给后台补齐
+
+    import time as _t
+    if _t.time() - _LG_FAIL_TS.get(symbol, 0.0) < _LG_FAIL_COOLDOWN:
+        return {}   # 该指数处于冷却期（逐只，避免一只失败拖累全部）
+
+    # PE / PB 各自独立重试，允许部分成功（一次 flaky 不丢整只）
+    pe_df = _lg_fetch(ak.stock_index_pe_lg, name)
+    pb_df = _lg_fetch(ak.stock_index_pb_lg, name)
+    if pe_df is None and pb_df is None:
+        _LG_FAIL_TS[symbol] = _t.time()
+        return {}
+    out: Dict = {}
+    try:
+        if pe_df is not None:
+            pe_col = "滚动市盈率" if "滚动市盈率" in pe_df.columns else "静态市盈率"
+            out["pe"] = float(pe_df[pe_col].iloc[-1])
+            out["pe_percentile"] = _series_percentile(pe_df[pe_col], years)
+            out["pe_date"] = str(pd.Timestamp(pe_df["日期"].iloc[-1]).date())
+        if pb_df is not None:
+            pb_col = "市净率" if "市净率" in pb_df.columns else "等权市净率"
+            out["pb"] = float(pb_df[pb_col].iloc[-1])
+            out["pb_percentile"] = _series_percentile(pb_df[pb_col], years)
+    except (KeyError, ValueError, IndexError) as e:
+        logger.warning(f"乐咕估值解析失败 {symbol}: {e}")
+        return {}
+    out["valuation_source"] = f"legulegu(月频·{name})"
+    # 完整结果缓存 1 天；部分结果缓存 1 小时（便于稍后补齐）
+    ttl = 86400 if ("pe" in out and "pb" in out) else 3600
+    set_index_cache_data(cache_key, out, cache_duration=ttl)
+    logger.info(f"乐咕真实估值 {symbol}: PE={out.get('pe')} PB={out.get('pb')} ttl={ttl}s")
+    return out
+
+
+_WARMING = {"on": False}
+
+
+def warm_real_valuations(symbols=None) -> None:
+    """在**后台线程**里为大盘指数逐个补齐真实估值（节流，不阻塞页面）。"""
+    symbols = symbols or [s for s, _ in REAL_VALUATION_INDEXES]
+    if _WARMING["on"]:
+        return
+    _WARMING["on"] = True
+
+    def _worker():
+        try:
+            for sym in symbols:
+                try:
+                    _valuation_from_legulegu(sym, allow_fetch=True)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"后台补齐估值失败 {sym}: {type(e).__name__}")
+        finally:
+            _WARMING["on"] = False
+            logger.info("大盘指数真实估值后台补齐完成")
+
+    import threading
+    threading.Thread(target=_worker, daemon=True, name="index_valuation_warm").start()
 
 
 def estimate_historical_pe(
     symbol: str, price_history_df: pd.DataFrame, period_years: int = 10
 ):
-    """
-    估算历史PE序列
-    :param symbol: 指数代码
-    :param price_history_df: 价格历史数据DataFrame
-    :param period_years: 估算周期
-    :return: 历史PE序列列表
+    """⚠ 估算历史PE序列（**非真实估值**）。
+
+    模型：`PE ≈ 典型区间中值 × (价格 / 价格中位数)`，再夹到硬编码区间。
+    也就是说该"PE"本质是**价格的线性缩放**，不含任何基本面信息；
+    由此算出的"PE 分位"实际是**价格分位**。仅在无真实估值源（乐咕）时兜底，
+    调用方应以 `valuation_source` 标注"estimate"。
     """
     try:
         # 这里使用一个简化的PE估算模型
@@ -870,12 +878,10 @@ def estimate_historical_pe(
 def estimate_historical_pb(
     symbol: str, price_history_df: pd.DataFrame, period_years: int = 10
 ):
-    """
-    估算历史PB序列
-    :param symbol: 指数代码
-    :param price_history_df: 价格历史数据DataFrame
-    :param period_years: 估算周期
-    :return: 历史PB序列列表
+    """⚠ 估算历史PB序列（**非真实估值**）。
+
+    模型：`PB ≈ 典型区间中值 × (0.8 + 0.4×价格/价格中位数)`，夹到硬编码区间 ——
+    同样只是价格的缩放，不含基本面信息。仅作无真实估值源时的兜底。
     """
     try:
         # PB估算模型
@@ -924,92 +930,71 @@ def estimate_historical_pb(
 
 
 def get_enhanced_index_data(symbol: str):
-    """
-    获取增强的指数数据，包括价格、估值和百分位数
-    :param symbol: 指数代码
-    :return: 包含价格、估值和百分位数的综合数据
-    """
-    cache_key = f"enhanced_index_data_{symbol}"
+    """单只指数的综合数据：价格 + 估值（PE/PB/分位）。
 
-    # 尝试从缓存获取数据
+    估值优先级：
+      1) `_valuation_from_legulegu` —— **真实** PE/PB（仅少数大盘指数，月频）；
+      2) 回退：价格缩放估算（`estimate_historical_pe/pb`，**非真实估值**），
+         `valuation_source` 标注为 estimate，前端可据此提示"估算"。
+    性能：估值分位与当前值共用**同一次**历史取数（原先分别取 3 次）。
+    """
+    cache_key = f"enhanced_index_data_v8_{symbol}"
     cached_data = get_index_cached_data(cache_key)
     if cached_data is not None and isinstance(cached_data, dict):
-        logger.info(f"从缓存获取增强的指数数据: {symbol}")
         return cached_data
 
     try:
-        # 获取基础数据
-        spot_data = get_sina_index_spot_data()
-        current_data = (
-            spot_data[spot_data["代码"] == symbol]
-            if not spot_data.empty
-            else pd.DataFrame()
-        )
-
-        # 获取PE和PB百分位数（使用新的独立算法）
-        pe_percentile = calculate_valuation_percentile(symbol, "pe")
-        pb_percentile = calculate_valuation_percentile(symbol, "pb")
-
-        # 获取当前价格，用于估算当前PE和PB值
-        current_price = None
-        if not current_data.empty and len(current_data) > 0:
-            current_price = current_data.iloc[0].get("最新价") or current_data.iloc[
-                0
-            ].get("close")
-
-        # 基于当前价格和历史数据估算当前PE和PB值
-        current_pe = None
-        current_pb = None
-
-        if current_price:
-            # 使用历史数据估算当前PE和PB
-            # 这里使用与calculate_valuation_percentile函数中相同的估算方法
-            history_data = get_index_history(
-                symbol, period="1Y"
-            )  # 获取一年数据进行估算
-            if history_data and len(history_data) > 0:
-                df = pd.DataFrame(history_data)
+        # 1) 真实估值（乐咕，月频）：**页面路径只读缓存，不阻塞**；缺失则触发后台补齐
+        real = _valuation_from_legulegu(symbol, allow_fetch=False)
+        if not real and symbol in _REAL_SYMBOLS:
+            warm_real_valuations()          # 后台线程补齐，本次先用兜底值
+        if real.get("pe") is not None:
+            pe, pb = real["pe"], real["pb"]
+            pe_pct, pb_pct = real.get("pe_percentile"), real.get("pb_percentile")
+            source = real.get("valuation_source")
+            valuation_data = real
+        else:
+            # 2) 回退：一次 10Y 历史，同时算当前值(末值)与分位
+            history = get_index_history(symbol, period="10Y")
+            df = pd.DataFrame(history or [])
+            if not df.empty:
                 df["date"] = pd.to_datetime(df["date"])
                 df = df.sort_values("date").reset_index(drop=True)
+            pe_hist = estimate_historical_pe(symbol, df, 10) if not df.empty else None
+            pb_hist = estimate_historical_pb(symbol, df, 10) if not df.empty else None
+            pe = float(pd.Series(pe_hist).dropna().iloc[-1]) if pe_hist else None
+            pb = float(pd.Series(pb_hist).dropna().iloc[-1]) if pb_hist else None
+            pe_pct = _series_percentile(pe_hist, 10) if pe_hist else None
+            pb_pct = _series_percentile(pb_hist, 10) if pb_hist else None
+            source = "estimate(价格缩放·非真实估值)" if pe is not None else None
+            valuation_data = {}
 
-                # 估算当前PE值
-                pe_history = estimate_historical_pe(symbol, df, 1)
-                if pe_history and len(pe_history) > 0:
-                    current_pe = pe_history[-1]  # 使用最后一个值作为当前估算值
-
-                # 估算当前PB值
-                pb_history = estimate_historical_pb(symbol, df, 1)
-                if pb_history and len(pb_history) > 0:
-                    current_pb = pb_history[-1]  # 使用最后一个值作为当前估算值
-
-        # 获取估值数据（保留原有逻辑）
-        valuation_data = get_index_valuation_data(symbol)
-
-        # 准备价格数据
+        # 价格快照（spot 全量，模块内已缓存 24h）
+        spot_data = get_sina_index_spot_data()
+        current_data = (spot_data[spot_data["代码"] == symbol]
+                        if not spot_data.empty else pd.DataFrame())
         price_data = {}
-        if not current_data.empty and len(current_data) > 0:
+        if not current_data.empty:
             try:
                 price_data = current_data.iloc[0].to_dict()
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 logger.error(f"获取价格数据时出现错误 {symbol}: {e}")
-                price_data = {}
 
-        # 组合数据
         enhanced_data = {
             "symbol": symbol,
             "name": INDEX_SYMBOL_TO_NAME_MAP.get(symbol, ""),
             "price_data": price_data,
             "valuation_data": valuation_data,
-            "pe": current_pe,
-            "pb": current_pb,
-            "pe_percentile": pe_percentile,
-            "pb_percentile": pb_percentile,
+            "pe": pe, "pb": pb,
+            "pe_percentile": pe_pct, "pb_percentile": pb_pct,
+            "valuation_source": source,
             "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
-
-        # 缓存数据
-        set_index_cache_data(cache_key, enhanced_data, cache_duration=3 * 24 * 3600)
-        logger.info(f"获取增强的指数数据并存入缓存: {symbol}")
+        # 大盘指数若暂时回退到估算（真实估值后台补齐中），只缓存 10 分钟以便尽快刷新
+        _fallback_real = (symbol in _REAL_SYMBOLS
+                          and str(source or "").startswith("estimate"))
+        ttl = 600 if _fallback_real else 3 * 24 * 3600
+        set_index_cache_data(cache_key, enhanced_data, cache_duration=ttl)
         return enhanced_data
     except Exception as e:
         logger.error(f"获取增强的指数数据失败 {symbol}: {e}")
@@ -1026,7 +1011,7 @@ def get_index_chart_data(
     :param use_growth_rate: 是否使用增长率对比
     :return: 适合ECharts展示的数据格式
     """
-    cache_key = f"prepared_index_chart_data_{','.join(sorted(symbols))}_{period}_{use_growth_rate}"
+    cache_key = f"prepared_index_chart_data_v3_{','.join(sorted(symbols))}_{period}_{use_growth_rate}"
 
     # 尝试从缓存获取数据
     cached_data = get_index_cached_data(cache_key)

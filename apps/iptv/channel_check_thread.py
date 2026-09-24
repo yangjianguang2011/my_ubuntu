@@ -3,8 +3,13 @@ import sys
 import os
 import concurrent.futures
 
+# 路径基准：当前工作目录（输出 ok.txt / fail.txt 也写在这里）。
+# 输入文件可用命令行参数覆盖：python channel_check_thread.py <m3u路径>
 current_directory = os.getcwd()
-sourceFileName = os.path.join(current_directory, "adult_latest.m3u")
+sourceFileName = (
+    sys.argv[1] if len(sys.argv) > 1
+    else os.path.join(current_directory, "adult_latest.m3u")
+)
 channelsOKFile = os.path.join(current_directory, "ok.txt")
 channelsFailFile = os.path.join(current_directory, "fail.txt")
 
@@ -113,17 +118,17 @@ def check_program_list(file_path, ffmpeg_path):
         fail_files = 0
         with open(channels_ok_file, 'a', encoding='utf-8', errors='ignore') as ok_file, \
                 open(channels_fail_file, 'a', encoding='utf-8', errors='ignore') as fail_file:
-            for url, result in zip(urls, results):
-                clean_description = next((desc for u, desc in zip(urls, descriptions) if u == url), None)
-                uc, valid = result
+            # urls / descriptions / results 三者按同一顺序一一对应，直接 zip 即可；
+            # 原实现按 url 线性反查描述（O(n²)），且同一 url 出现多次时会取到第一条描述（错位）。
+            for description, (url, valid) in zip(descriptions, results):
                 if valid:
                     ok_files += 1
-                    ok_file.write(f"{clean_description},{url}\n")
-                    print(f"{clean_description} ({url}) is valid.")
+                    ok_file.write(f"{description},{url}\n")
+                    print(f"{description} ({url}) is valid.")
                 else:
                     fail_files += 1
-                    fail_file.write(f"{clean_description},{url}\n")
-                    print(f"{clean_description} ({url}) is invalid.")
+                    fail_file.write(f"{description},{url}\n")
+                    print(f"{description} ({url}) is invalid.")
         print(f"###OK channels {ok_files}  -  fail channels {fail_files}\n")
     except FileNotFoundError:
         print(f"File {file_path} not found.")

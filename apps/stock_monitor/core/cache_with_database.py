@@ -11,18 +11,20 @@ from config import get_path, setup_logger
 
 logger = setup_logger(__name__)
 
-STOCK_CACHE_DURATOIN_SECONDS = int(get_path("cache", "stock_cache_timeout", 3 * 60))
-INDUSTRY_CACHE_DURATION_SECONDS = int(
-    get_path("cache", "industry_cache_timeout", 24 * 60 * 60)
+STOCK_CACHE_DURATOIN_SECONDS = int(
+    get_path("stock_monitor", "stock_cache_timeout", 3 * 60)
+)
+DEFAULT_CACHE_DURATION_SECONDS = int(
+    get_path("stock_monitor", "default_cache_timeout", 24 * 60 * 60)
 )
 ANALYST_CACHE_DURATION_SECONDS = int(
-    get_path("cache", "analyst_cache_timeout", 24 * 60 * 60)
+    get_path("stock_monitor", "analyst_cache_timeout", 24 * 60 * 60)
 )
 INDEX_CACHE_DURATION_SECONDS = int(
-    get_path("cache", "index_cache_timeout", 1 * 24 * 60 * 60)
+    get_path("stock_monitor", "index_cache_timeout", 1 * 24 * 60 * 60)
 )
 FUND_CACHE_DURATION_SECONDS = int(
-    get_path("cache", "fund_cache_timeout", 1 * 24 * 60 * 60)
+    get_path("stock_monitor", "fund_cache_timeout", 1 * 24 * 60 * 60)
 )
 
 
@@ -102,22 +104,22 @@ class LongTermStorage:
             with self.lock:  # 添加锁保护
                 with sqlite3.connect(self.db_path) as conn:
                     cursor = conn.cursor()
-                cursor.execute(
-                    """
-                    INSERT OR REPLACE INTO long_term_storage
-                    (key, data, created_at, updated_at, expires_at, module_type)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                    (
-                        key,
-                        json.dumps(data, ensure_ascii=False),
-                        now.isoformat(),
-                        now.isoformat(),
-                        expires_at.isoformat() if expires_at else None,
-                        module_type,
-                    ),
-                )
-                conn.commit()
+                    cursor.execute(
+                        """
+                        INSERT OR REPLACE INTO long_term_storage
+                        (key, data, created_at, updated_at, expires_at, module_type)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                        (
+                            key,
+                            json.dumps(data, ensure_ascii=False),
+                            now.isoformat(),
+                            now.isoformat(),
+                            expires_at.isoformat() if expires_at else None,
+                            module_type,
+                        ),
+                    )
+                    conn.commit()
                 logger.info(f"数据已存储到长期存储: {key} (模块: {module_type})")
                 return True
         except Exception as e:
@@ -254,17 +256,17 @@ class LongTermStorage:
             with self.lock:  # 添加锁保护
                 with sqlite3.connect(self.db_path) as conn:
                     cursor = conn.cursor()
-                cursor.execute(
-                    """
-                    DELETE FROM long_term_storage
-                    WHERE expires_at IS NOT NULL AND expires_at < ?
-                """,
-                    (current_time,),
-                )
-                deleted_count = cursor.rowcount
+                    cursor.execute(
+                        """
+                        DELETE FROM long_term_storage
+                        WHERE expires_at IS NOT NULL AND expires_at < ?
+                    """,
+                        (current_time,),
+                    )
+                    deleted_count = cursor.rowcount
+                    conn.commit()
                 if deleted_count > 0:
                     logger.info(f"清理了 {deleted_count} 条过期的长期存储数据")
-                conn.commit()
                 return deleted_count
         except Exception as e:
             logger.error(f"清理过期长期存储数据时出错: {e}")
@@ -305,18 +307,6 @@ class SQLiteCache:
                 cursor.execute(
                     """
                     CREATE TABLE IF NOT EXISTS stock_cache (
-                        cache_key TEXT PRIMARY KEY,
-                        data TEXT NOT NULL,
-                        cache_time TIMESTAMP NOT NULL,
-                        cache_duration INTEGER NOT NULL
-                    )
-                """
-                )
-
-                # 创建行业数据缓存表
-                cursor.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS industry_cache (
                         cache_key TEXT PRIMARY KEY,
                         data TEXT NOT NULL,
                         cache_time TIMESTAMP NOT NULL,
@@ -366,9 +356,6 @@ class SQLiteCache:
                     "CREATE INDEX IF NOT EXISTS idx_stock_cache_time ON stock_cache(cache_time)"
                 )
                 cursor.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_industry_cache_time ON industry_cache(cache_time)"
-                )
-                cursor.execute(
                     "CREATE INDEX IF NOT EXISTS idx_index_cache_time ON index_cache(cache_time)"
                 )
                 cursor.execute(
@@ -400,16 +387,6 @@ class SQLiteCache:
                 )
                 logger.info(f"清理了 {cursor.rowcount} 条股票过期缓存数据")
 
-                # 清理过期的行业缓存
-                cursor.execute(
-                    """
-                    DELETE FROM industry_cache
-                    WHERE datetime(cache_time, '+' || cache_duration || ' seconds') < ?
-                """,
-                    (current_time,),
-                )
-                logger.info(f"清理了 {cursor.rowcount} 条行业过期缓存数据")
-
                 # 清理过期的基金缓存
                 cursor.execute(
                     """
@@ -440,8 +417,6 @@ class SQLiteCache:
 
                 if cache_type == "stock":
                     table_name = "stock_cache"
-                elif cache_type == "industry":
-                    table_name = "industry_cache"
                 elif cache_type == "analyst":
                     table_name = "analyst_cache"
                 elif cache_type == "index":
@@ -504,12 +479,6 @@ class SQLiteCache:
                     if cache_duration is not None
                     else STOCK_CACHE_DURATOIN_SECONDS
                 )
-            elif cache_type == "industry":
-                duration = (
-                    cache_duration
-                    if cache_duration is not None
-                    else INDUSTRY_CACHE_DURATION_SECONDS
-                )
             elif cache_type == "analyst":
                 duration = (
                     cache_duration
@@ -530,12 +499,12 @@ class SQLiteCache:
                 )
             else:  # 默认
                 logger.warning(
-                    f"set_cache_data: unknow cache_type {cache_type} , use defalut industry cache duration..."
+                    f"set_cache_data: unknow cache_type {cache_type} , use default cache duration..."
                 )
                 duration = (
                     cache_duration
                     if cache_duration is not None
-                    else INDUSTRY_CACHE_DURATION_SECONDS
+                    else DEFAULT_CACHE_DURATION_SECONDS
                 )
 
             with sqlite3.connect(self.db_path) as conn:
@@ -544,8 +513,6 @@ class SQLiteCache:
                 # 根据缓存类型选择表名
                 if cache_type == "stock":
                     table_name = "stock_cache"
-                elif cache_type == "industry":
-                    table_name = "industry_cache"
                 elif cache_type == "analyst":
                     table_name = "analyst_cache"
                 elif cache_type == "index":
@@ -554,7 +521,7 @@ class SQLiteCache:
                     table_name = "fund_cache"
                 else:  # analyst 或其他类型
                     logger.warning(
-                        f"未知缓存类型 {cache_type}，使用默认表 industry_cache"
+                        f"未知缓存类型 {cache_type}，使用默认表 stock_cache"
                     )
                     table_name = "analyst_cache"
 
@@ -610,12 +577,6 @@ class HybridCache:
                         if cache_duration is not None
                         else STOCK_CACHE_DURATOIN_SECONDS
                     )
-                elif cache_type == "industry":
-                    duration = (
-                        cache_duration
-                        if cache_duration is not None
-                        else INDUSTRY_CACHE_DURATION_SECONDS
-                    )
                 elif cache_type == "analyst":
                     duration = (
                         cache_duration
@@ -626,8 +587,8 @@ class HybridCache:
                     duration = (
                         cache_duration
                         if cache_duration is not None
-                        else INDUSTRY_CACHE_DURATION_SECONDS
-                    )  # 指数数据使用与行业数据相同的缓存时长
+                        else INDEX_CACHE_DURATION_SECONDS
+                    )
                 elif cache_type == "fund":
                     duration = (
                         cache_duration
@@ -651,10 +612,6 @@ class HybridCache:
 
         # 2. 检查二级缓存
         if cache_type == "stock":
-            data = self.secondary_cache.get_cached_data(
-                cache_key, cache_type, cache_duration
-            )
-        elif cache_type == "industry":
             data = self.secondary_cache.get_cached_data(
                 cache_key, cache_type, cache_duration
             )
@@ -741,16 +698,6 @@ def set_cache_data(cache_key, data):
     cache_system.set_cache_data(cache_key, data, "stock")
 
 
-def get_industry_cached_data(cache_key, cache_duration=None):
-    """从行业数据缓存获取数据"""
-    return cache_system.get_cached_data(cache_key, "industry", cache_duration)
-
-
-def set_industry_cache_data(cache_key, data):
-    """设置行业数据缓存"""
-    cache_system.set_cache_data(cache_key, data, "industry")
-
-
 def get_analyst_cached_data(cache_key, cache_duration=None):
     """从分析师数据缓存获取数据"""
     return cache_system.get_cached_data(cache_key, "analyst", cache_duration)
@@ -797,7 +744,7 @@ def retrieve_long_term_data(key):
 
 
 def delete_long_term_data(key):
-    """通用删除函数"""
+    """通用删除函数（供快照裁剪等使用）"""
     return long_term_storage.delete_data(key)
 
 
@@ -806,9 +753,6 @@ def get_module_long_term_data(module_type, limit=None):
     return long_term_storage.get_module_data(module_type, limit)
 
 
-def cleanup_expired_long_term_data():
-    """清理过期的长期存储数据"""
-    return long_term_storage.cleanup_expired_data()
 
 
 # 使用示例
@@ -825,14 +769,6 @@ if __name__ == "__main__":
     # 获取缓存
     retrieved_data = get_cached_data(test_key)
     logger.info(f"从缓存获取的数据: {retrieved_data}")
-
-    # 测试行业数据缓存
-    industry_key = "test_industry_data"
-    industry_data = {"name": "科技行业", "change_pct": 3.2, "stocks_count": 50}
-
-    set_industry_cache_data(industry_key, industry_data)
-    retrieved_industry_data = get_industry_cached_data(industry_key)
-    logger.info(f"从行业缓存获取的数据: {retrieved_industry_data}")
 
     # 测试分析师数据缓存
     analyst_key = "test_analyst_data"

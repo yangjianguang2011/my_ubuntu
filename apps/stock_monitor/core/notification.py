@@ -6,10 +6,13 @@ from config import get_path, setup_logger
 
 logger = setup_logger(__name__)
 
-SERVER = get_path("messaging", "message_server", "https://message.jgyang.cn:5555")
-USERNAME = get_path("messaging", "message_username", "root")
-TOKEN = get_path("messaging", "message_token", "12123121")
+SERVER = get_path("messaging", "message_server", "")
+USERNAME = get_path("messaging", "message_username", "")
+TOKEN = get_path("messaging", "message_token", "")
 CHANNEL = get_path("messaging", "message_channel", "wechat")
+# 是否真正发送推送。本机开发可置 false 走「测试模式」（只记日志、不发请求）。
+# 原实现读 `[paths] platform`（该键从未存在）导致测试模式永不生效，故改为显式开关。
+ENABLED = get_path("messaging", "enabled", "true").lower() in ("1", "true", "yes")
 
 
 def send_message(title, description, content, channel=None):
@@ -21,6 +24,11 @@ def send_message(title, description, content, channel=None):
     :param channel: 推送渠道，默认使用环境变量配置
     :return: 推送结果
     """
+    if not (SERVER and USERNAME and TOKEN):
+        logger.warning(
+            "未配置消息服务（messaging.message_server/username/token），跳过推送"
+        )
+        return {"success": False, "message": "未配置消息服务", "data": {}}
     try:
         # 使用环境变量中的配置
         push_channel = channel or CHANNEL
@@ -28,9 +36,9 @@ def send_message(title, description, content, channel=None):
         # 构建GET请求URL
         url = f"{SERVER}/push/{USERNAME}?title={title}&description={description}&content={content}&token={TOKEN}&channel={push_channel}"
 
-        if get_path("paths", "platform", "linux") == "windows":
-            # do net send request in windows way, just for testing purpose
-            logger.info("send message in windows way")
+        if not ENABLED:
+            # 测试模式：不真正发请求（仅记日志），便于本机调试
+            logger.info(f"消息推送测试模式（未真正发送）: {title}")
             result = {"success": True, "message": "测试模式下的推送成功", "data": {}}
         else:
             response = requests.get(url, timeout=10)

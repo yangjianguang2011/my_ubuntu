@@ -27,7 +27,6 @@ from stock_monitor.core.web_app import app as web_app
 def preload_cache_data():
     """预加载常用数据到缓存"""
     try:
-        from stock_monitor.core.config_manager import get_industry_page_enabled
         from stock_monitor.data_fetchers.analyst_data_fetcher import (
             _fetch_analyst_stocks,
             get_analyst_rank_data,
@@ -40,16 +39,12 @@ def preload_cache_data():
             SINA_ALL_INDEX,
             get_index_daily_data,
         )
-        from stock_monitor.data_fetchers.industry_data_fetcher import (
-            get_industry_names,
-            get_single_industry_history,
-        )
     except ImportError as e:
         logger.error(f"导入数据获取模块失败: {e}")
         return
 
     sleep_duration = (
-        int(get_path("cache", "industry_cache_timeout", 24 * 60 * 60)) + 60
+        int(get_path("stock_monitor", "analyst_cache_timeout", 24 * 60 * 60)) + 60
     )  # 多等一分钟再循环
     first_run = True
 
@@ -58,13 +53,10 @@ def preload_cache_data():
         logger.info("开始预加载缓存数据...")
 
         try:
-            # 获取所有分析师和行业板块的列表，用于计算平均延迟时间
+            # 获取所有分析师列表，用于计算平均延迟时间（行业页已下线）
             logger.info("获取分析师数据列表...")
-            all_analysts = get_analyst_rank_data()  # 获取所有分析师列表
-            logger.info("获取行业数据列表...")
-            all_industries = (
-                get_industry_names() if get_industry_page_enabled() else []
-            )  # 获取所有行业列表
+            all_analysts = get_analyst_rank_data()
+            all_industries = []
             all_indexs = SINA_ALL_INDEX
             all_funds = SELECTED_FUND_LIST
 
@@ -133,30 +125,16 @@ def preload_cache_data():
                     f"[{idx+1}/{len(all_analysts)}] 预加载分析师详情 {analyst_name}({analyst_id}) ..."
                 )
                 try:
-                    analyst_stocks, _, _ = _fetch_analyst_stocks(
+                    analyst_stocks = _fetch_analyst_stocks(
                         analyst_id, analyst_name, "最新跟踪成分股"
                     )
-                    logger.debug(f"分析师 {analyst_name}({analyst_id}) 数据预加载成功")
+                    logger.debug(
+                        f"分析师 {analyst_name}({analyst_id}) 数据预加载成功："
+                        f"{len(analyst_stocks or [])} 只")
                 except Exception as e:
                     logger.error(
                         f"预加载分析师 {analyst_name}({analyst_id}) 数据失败: {e}",
                         exc_info=True,
-                    )
-                time.sleep(avg_delay_per_call)
-
-            # 预加载行业数据
-            logger.info(f"开始预加载 {len(all_industries)} 个行业数据...")
-            for idx, industry in enumerate(all_industries):
-                industry_name = industry.get("板块名称", "")
-                logger.info(
-                    f"[{idx+1}/{len(all_industries)}] 跳过预加载行业历史数据 {industry_name} ..."
-                )
-                try:
-                    get_single_industry_history(industry_name, start_date, end_date)
-                    logger.debug(f"行业 {industry_name} 数据预加载成功")
-                except Exception as e:
-                    logger.error(
-                        f"预加载行业 {industry_name} 数据失败: {e}", exc_info=True
                     )
                 time.sleep(avg_delay_per_call)
 

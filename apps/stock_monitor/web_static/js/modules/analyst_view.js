@@ -85,11 +85,9 @@ function renderAnalystFocusStocks(focusStocksData) {
     // 显示分析师重点关注股票
     if (focusStocksData.success && focusStocksData.data && focusStocksData.data.top_focus_stocks) {
         // 获取当前页面参数
-        const periodSelect = document.getElementById('analyst-period-select');
         const topStocksSelect = document.getElementById('analyst-top-stocks-select');
         const selectedTopAnalystsSelect = document.getElementById('analyst-top-analysts-select');
 
-        const period = periodSelect ? periodSelect.value : '3个月';
         const topStocks = topStocksSelect ? topStocksSelect.value : 50;
         const topAnalysts = selectedTopAnalystsSelect ? selectedTopAnalystsSelect.value : 50;
 
@@ -102,7 +100,8 @@ function renderAnalystFocusStocks(focusStocksData) {
                 <div class="analyst-full-width-panel">
                     <div class="analyst-summary">
                         <h3>重点关注股票摘要</h3>
-                        <p><strong>算法说明：</strong>统计所选分析师范围内，被最多分析师跟踪的股票，按关注数量排序；历史跟踪数据是基于默认参数计算的分析师个数</p>
+                        <p><strong>算法说明：</strong>口径为东方财富<b>年度收益率排行</b>（${new Date().getFullYear()} 年前 100 名，与东财页面「最新排行」一致）；统计所选范围内分析师的<b>最新跟踪成份股</b>，按被多少位分析师跟踪排序（同一分析师对同一股票只计一次）。<b>3/6/12 个月收益率仅作展示，不参与排序</b>（akshare 只有年度榜接口，无法复现页面的 3/6/12 个月榜）。</p>
+                        <p><strong>历史跟踪曲线：</strong>记录的是「默认参数（前 50 名分析师 / 前 50 只股票）」下每只股票当日的关注数量。</p>
                         <p><strong>数据统计：</strong>处理分析师: ${focusStocksData.data.total_analysts_processed || 0} |
                            跟踪股票总数: ${focusStocksData.data.latest_unique_stocks || 0} |
                            多人关注股票: ${focusStocksData.data.latest_focus_stocks || 0}</p>
@@ -205,12 +204,16 @@ function initFocusStocksTable(data) {
 function loadAnalystFocusStocks() {
     console.log('正在加载分析师重点关注股票数据...');
 
-    // 获取选择的参数
+    // 口径标签显示当前年份（后端按「当前年度排行」取数）
     const periodSelect = document.getElementById('analyst-period-select');
+    if (periodSelect && periodSelect.options.length) {
+        periodSelect.options[0].text = `${new Date().getFullYear()}年度收益率排行`;
+    }
+
+    // 获取选择的参数
     const topStocksSelect = document.getElementById('analyst-top-stocks-select');
     const selectedTopAnalystsSelect = document.getElementById('analyst-top-analysts-select');
 
-    const period = periodSelect ? periodSelect.value : '3个月';
     const topStocks = topStocksSelect ? topStocksSelect.value : 50;
     const topAnalysts = selectedTopAnalystsSelect ? selectedTopAnalystsSelect.value : 50;
 
@@ -218,8 +221,8 @@ function loadAnalystFocusStocks() {
     const analystContainer = document.getElementById('analyst-focus-stocks-container');
     analystContainer.innerHTML = '<div class="loading">正在加载分析师重点关注股票数据...</div>';
 
-    // 构建API请求URL
-    const apiUrl = `/api/analyst/focus_stocks?period=${encodeURIComponent(period)}&top_analysts=${encodeURIComponent(topAnalysts)}&top_stocks=${encodeURIComponent(topStocks)}`;
+    // 构建API请求URL（口径固定为「年度排行」，无需传 period）
+    const apiUrl = `/api/analyst/focus_stocks?top_analysts=${encodeURIComponent(topAnalysts)}&top_stocks=${encodeURIComponent(topStocks)}`;
 
     // 调用API获取数据
     fetch(apiUrl)
@@ -348,7 +351,7 @@ function renderRecentlyUpdatedStocks(data, container) {
         <div class="analyst-full-width-panel">
             <div class="analyst-summary">
                 <h3>最近更新股票数据摘要</h3>
-                <p><strong>算法说明：</strong>筛选最近${data.days}天内有更新的分析师，获取其跟踪的最新股票</p>
+                <p><strong>算法说明：</strong>筛选最近${data.days}天内有更新的分析师，取其跟踪的成份股。「最新跟踪」按<b>最新评级日期</b>判定、「历史跟踪」按<b>调出日期</b>判定（该字段缺失时退回调入日期）。口径同为东方财富<b>年度收益率排行</b>（${new Date().getFullYear()} 年前 100 名）。</p>
                 <p><strong>参数设置：</strong>时间范围: 最近${data.days}天</p>
                 <p><strong>数据统计：</strong>符合条件分析师: ${analystsSet.size} |
                    符合条件股票: ${data.data.length} |
@@ -374,7 +377,6 @@ function initRecentlyUpdatedStocksTable(data) {
     
     const columns = [
         {title: "分析师名称", field: "analyst_name", width: 120, headerSort: true},
-        {title: "分析师行业", field: "analyst_industry", width: 120, headerSort: true},
         {title: "股票代码", field: "股票代码", width: 100, headerSort: true},
         {title: "股票名称", field: "股票名称", width: 120, headerSort: true},
         {title: "调入日期", field: "调入日期", width: 100, headerSort: true, sorter: "string"},

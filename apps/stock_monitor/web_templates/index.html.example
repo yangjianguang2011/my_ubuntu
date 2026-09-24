@@ -5,23 +5,24 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>股票监控分析系统</title>
     <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="stylesheet" href="/static/css/common_style.css">
     <link rel="stylesheet" href="/static/css/analyst_style.css">
-    <link rel="stylesheet" href="/static/css/industry_style.css">
 </head>
 
 <body>
     <div class="container">
         <h1>股票监控分析系统</h1>
-
+        
         <!-- 导航菜单 -->
         <nav class="nav-menu">
             <button class="nav-btn active" data-page="stock-monitor">股票监控</button>
+            <button class="nav-btn" data-page="picker">策略选股</button>
+            <button class="nav-btn" data-page="valuation">估值报告</button>
             <button class="nav-btn" data-page="analyst-view">分析师数据</button>
-            <button class="nav-btn" data-page="industry-index">行业板块统计</button>
             <button class="nav-btn" data-page="index-monitor">指数数据统计</button>
             <button class="nav-btn" data-page="fund-monitor">基金数据统计</button>
         </nav>
-
+        
         <!-- 股票监控页面 -->
         <div id="stock-monitor-page" class="page-content active-page">
 
@@ -51,36 +52,182 @@
                     <div class="form-row">
                         <input type="text" id="key-price-alerts" placeholder="关键价位报警 (格式: 价格:类型,如 64:支撑位,66:压力位)">
                     </div>
-
+                    
                     <div class="form-row">
                         <input type="text" id="change-pct-alerts" placeholder="涨跌幅报警 (格式: 百分比:类型,如 3:警告,5:警报)">
-                    </div>
+                    </div>                
                     <div class="form-row">
                         <label>
                             <input type="checkbox" id="limit-alert"> 涨跌停报警
                         </label>
                     </div>
-
+                    
                     <button type="submit">添加股票</button>
                 </form>
             </div>
+            
+            <!-- 市场温度（原为独立页面，现并入本页底部） -->
+            <div class="panel" id="market-section">
+                <h2 style="margin-bottom:6px;">市场温度
+                    <span style="font-size:13px;color:#999;font-weight:normal;">上证综指 · 深证成指 · 创业板指</span>
+                </h2>
+                <p style="margin:0 0 10px;color:#777;font-size:12px;">
+                    指数温度 = <b>50%×PE位 + 50%×PB位</b>（市值加权整体法，近 10 年分位）；位置越低越便宜、越高越贵。
+                    数据低频，<b>点「刷新温度」手动计算</b>（首次约 1~3 分钟），结果缓存 1 天。
+                </p>
+                <div style="display:flex;gap:10px;align-items:center;margin-bottom:10px;">
+                    <button id="mt-refresh" type="button" style="padding:6px 14px;">刷新温度</button>
+                    <span id="mt-status" style="font-size:13px;color:#333;">空闲</span>
+                </div>
+                <div id="mt-result"></div>
+            </div>
+        </div>
+        
+        <!-- 策略选股页面 -->
+        <div id="picker-page" class="page-content">
+            <h2>策略选股 <span style="font-size:14px;color:#999;">多头结构 · 金叉确认 · 回踩确认</span></h2>
 
-            <!-- 设置面板 -->
-            <div class="settings-section">
-                <h2>系统设置</h2>
-                <form id="settings-form">
-                    <div class="form-row">
-                        <label>检查间隔（秒）:</label>
-                        <input type="number" id="check-interval" value="300">
+            <div style="background:#f7f9fb;border:1px solid #e6e9ee;border-radius:6px;padding:14px 16px;margin-bottom:14px;">
+                <p style="margin:0 0 4px;color:#555;font-size:13px;">
+                    规则：<b>A 多头结构</b>(价格&gt;慢线、快&gt;中&gt;慢、快线向上) <b>· B 金叉确认</b>(中线上穿慢线，且在观察窗内)
+                    <b>· C 回踩确认</b>(收盘贴近快线且不深破中线、近窗口出现过回踩) ；量能缩量属软条件。
+                </p>
+                <p style="margin:0;color:#777;font-size:12px;">扫描在后台执行(逐股拉日线行情，数百只需数分钟)，期间可轮询进度；结果自动存入快照便于日后查看表现。</p>
+            </div>
+
+            <div style="display:flex;flex-wrap:wrap;gap:14px;margin-bottom:14px;align-items:flex-end;">
+                <label style="display:flex;flex-direction:column;font-size:13px;color:#666;">
+                    股票池
+                    <select id="pk-pool" style="margin-top:4px;padding:6px;">
+                        <option value="hs300">沪深300</option>
+                        <option value="zz500">中证500</option>
+                    </select>
+                </label>
+                <label style="display:flex;flex-direction:column;font-size:13px;color:#666;">
+                    快线MA(回调支撑)
+                    <input id="pk-ma-fast" type="number" value="20" style="margin-top:4px;width:70px;padding:6px;">
+                </label>
+                <label style="display:flex;flex-direction:column;font-size:13px;color:#666;">
+                    中线MA(金叉方)
+                    <input id="pk-ma-mid" type="number" value="60" style="width:70px;padding:6px;margin-top:4px;">
+                </label>
+                <label style="display:flex;flex-direction:column;font-size:13px;color:#666;">
+                    慢线MA(趋势)
+                    <input id="pk-ma-slow" type="number" value="200" style="width:90px;padding:6px;margin-top:4px;">
+                </label>
+                <label style="display:flex;flex-direction:column;font-size:13px;color:#666;">
+                    金叉观察窗(根)
+                    <input id="pk-cross-lookback" type="number" value="120" style="width:80px;padding:6px;margin-top:4px;">
+                </label>
+                <label style="display:flex;flex-direction:column;font-size:13px;color:#666;">
+                    现价距快线上限(%)
+                    <input id="pk-pullhigh" type="number" value="5.0" step="0.5" style="width:90px;padding:6px;margin-top:4px;">
+                </label>
+                <fieldset style="border:1px dashed #c9d2dc;border-radius:6px;margin:0;padding:4px 10px 8px;">
+                    <legend style="font-size:12px;color:#888;padding:0 4px;">回踩确认带(LOW可触及, 相对快线%)</legend>
+                    <div style="display:flex;gap:12px;">
+                        <label style="display:flex;flex-direction:column;font-size:12px;color:#666;">上浮
+                            <input id="pk-touch-above" type="number" value="3.0" step="0.5" style="width:70px;padding:5px;margin-top:3px;">
+                        </label>
+                        <label style="display:flex;flex-direction:column;font-size:12px;color:#666;">下探
+                            <input id="pk-touch-below" type="number" value="1.5" step="0.1" style="width:70px;padding:5px;margin-top:3px;">
+                        </label>
                     </div>
-                    <div class="form-row">
-                        <label>监控开始时间:</label>
-                        <input type="time" id="market-open-start" value="09:30">
-                        <label>监控结束时间:</label>
-                        <input type="time" id="market-open-end" value="16:30">
-                    </div>
-                    <button type="submit">保存设置</button>
-                </form>
+                </fieldset>
+                <label style="display:flex;align-items:center;gap:4px;font-size:13px;color:#666;margin-bottom:8px;">
+                    <input id="pk-volume" type="checkbox"> 启用缩量软条件
+                </label>
+                <label style="display:flex;align-items:center;gap:4px;font-size:13px;color:#666;margin-bottom:8px;">
+                    <input id="pk-force" type="checkbox"> 强制重拉行情(忽略缓存)
+                </label>
+                <div style="display:flex;gap:8px;">
+                    <button id="pk-run" style="padding:8px 16px;">开始扫描</button>
+                    <button id="pk-stop" style="padding:8px 16px;" disabled>停止</button>
+                </div>
+            </div>
+
+            <!-- 进度 -->
+            <div style="margin-bottom:14px;display:flex;align-items:center;gap:10px;">
+                <div id="pk-status" style="font-size:13px;color:#333;">空闲</div>
+            </div>
+            <div style="height:8px;background:#eef0f3;border-radius:4px;overflow:hidden;margin-bottom:6px;">
+                <div id="pk-bar" style="height:100%;width:0%;background:#1890ff;transition:width .3s;"></div>
+            </div>
+
+            <!-- 命中/观察 结果 -->
+            <div style="display:flex;gap:10px;margin-bottom:8px;">
+                <button id="pk-tab-hit" class="pk-tab active" style="padding:6px 14px;">完整命中</button>
+                <button id="pk-tab-part" class="pk-tab" style="padding:6px 14px;">观察(部分命中)</button>
+                <button id="pk-tab-hist" class="pk-tab" style="padding:6px 14px;">历史快照</button>
+            </div>
+            <div style="overflow:auto;background:#fff;border:1px solid #e6e9ee;border-radius:6px;">
+                <table id="pk-table" class="pk-table" style="width:100%;border-collapse:collapse;font-size:13px;">
+                    <thead id="pk-thead"></thead>
+                    <tbody id="pk-tbody"></tbody>
+                </table>
+                <div id="pk-empty" style="padding:18px;text-align:center;color:#aaa;">尚未扫描。选择参数后点击“开始扫描”。</div>
+            </div>
+        </div>
+        
+        <!-- 估值报告页面 -->
+        <div id="valuation-page" class="page-content">
+            <h2>个股估值报告 <span style="font-size:14px;color:#999;">市赚率 · 盈利调节市净率 · 价格周期</span></h2>
+
+            <div style="background:#f7f9fb;border:1px solid #e6e9ee;border-radius:6px;padding:14px 16px;margin-bottom:14px;">
+                <p style="margin:0 0 4px;color:#555;font-size:13px;">
+                    基于 stockdb 本地日K（前复权）计算：<b>估值维度</b>（市赚率 / 盈利调节市净率三口径）+ <b>价格周期</b> + <b>市场背景</b>。
+                    报告在后台计算（单股数秒），期间可轮询进度。
+                </p>
+                <p style="margin:0;color:#777;font-size:12px;">历史位置 = 截至当日的 expanding 位置(0~1)：越低越便宜，越高越贵；10%/90% 为极端区参考。本报告为状态描述，非买卖建议。</p>
+            </div>
+
+            <div style="display:flex;flex-wrap:wrap;gap:14px;margin-bottom:14px;align-items:flex-end;">
+                <label style="display:flex;flex-direction:column;font-size:13px;color:#666;">
+                    股票池
+                    <select id="vl-pool" style="margin-top:4px;padding:6px;">
+                        <option value="hs300">沪深300</option>
+                        <option value="zz500">中证500</option>
+                    </select>
+                </label>
+                <label style="display:flex;flex-direction:column;font-size:13px;color:#666;flex:1;min-width:260px;">
+                    股票（代码或名称，如 601166 兴业银行）
+                    <input id="vl-code" list="vl-stocks" placeholder="输入或选择股票代码" style="margin-top:4px;padding:6px;">
+                    <datalist id="vl-stocks"></datalist>
+                </label>
+                <div style="display:flex;gap:8px;">
+                    <button id="vl-run" style="padding:8px 16px;">生成报告</button>
+                </div>
+            </div>
+
+            <!-- 进度 -->
+            <div style="margin-bottom:14px;">
+                <span id="vl-status" style="font-size:13px;color:#333;">空闲</span>
+            </div>
+
+            <!-- 报告结果 -->
+            <div id="vl-result" style="display:none;">
+                <!-- 结论 banner -->
+                <div id="vl-conclusion" style="padding:14px 16px;border-radius:6px;margin-bottom:14px;border:1px solid #e6e9ee;"></div>
+
+                <!-- 最新读数面板 -->
+                <div style="background:#fff;border:1px solid #e6e9ee;border-radius:6px;padding:14px 16px;margin-bottom:14px;">
+                    <h3 style="margin:0 0 10px;">最新读数面板</h3>
+                    <table id="vl-panel-table" style="width:100%;border-collapse:collapse;font-size:13px;"></table>
+                </div>
+
+                <!-- 四层时序图 -->
+                <div style="background:#fff;border:1px solid #e6e9ee;border-radius:6px;padding:14px 16px;margin-bottom:14px;">
+                    <h3 style="margin:0 0 10px;">四层时序图</h3>
+                    <div id="vl-chart" style="width:100%;height:760px;"></div>
+                </div>
+
+                <!-- 买卖信号 -->
+                <div style="background:#fff;border:1px solid #e6e9ee;border-radius:6px;padding:14px 16px;margin-bottom:14px;">
+                    <h3 style="margin:0 0 10px;">盈利调节买卖信号（主口径）</h3>
+                    <div id="vl-signal-stats" style="margin-bottom:10px;"></div>
+                    <table id="vl-events-table" style="width:100%;border-collapse:collapse;font-size:13px;"></table>
+                    <p id="vl-events-note" style="color:#999;font-size:12px;margin:8px 0 0;"></p>
+                </div>
             </div>
         </div>
 
@@ -91,11 +238,8 @@
             <!-- 分析师重点关注股票控制面板 -->
             <div class="analyst-controls-top" style="display: flex; gap: 15px; align-items: center; flex-wrap: wrap; margin-bottom: 20px; padding: 15px; background-color: #f8f9fa; border-radius: 5px;">
                 <button id="refresh-analyst-btn">刷新分析师重点关注股票</button>
-                <select id="analyst-period-select">
-                    <option value="2025年">2025年收益率排行</option>
-                    <option value="3个月" selected>3个月收益率排行</option>
-                    <option value="6个月">6个月收益率排行</option>
-                    <option value="12个月">12个月收益率排行</option>
+                <select id="analyst-period-select" title="数据口径：东方财富年度排行（akshare 仅支持年度）">
+                    <option value="year" selected>年度收益率排行</option>
                 </select>
                 <select id="analyst-top-stocks-select">
                     <option value="20">显示前20只重点关注股票</option>
@@ -109,6 +253,7 @@
                     <option value="100">基于前100名分析师跟踪数据</option>
                     <option value="all">基于全部分析师跟踪数据</option>
                 </select>
+                <span style="color:#888;font-size:13px;">口径：东方财富<b>年度排行</b>（前100名）</span>
             </div>
 
             <!-- 分析师重点关注股票数据区域 -->
@@ -138,75 +283,7 @@
                 </div>
             </div>
         </div>
-
-        <!-- 行业板块页面 -->
-        <div id="industry-index-page" class="page-content">
-            <h2>行业板块统计</h2>
-            <div class="industry-controls">
-                <button id="refresh-industry-btn">刷新行业数据</button>
-                <select id="industry-period-select">
-                    <option value="1">最近1天</option>
-                    <option value="30" selected>最近30天</option>
-                    <option value="60">最近60天</option>
-                    <option value="120">最近120天</option>
-                    <option value="365">最近一年</option>
-                </select>
-                <select id="top-n-input">
-                    <option value="5">显示前5个</option>
-                    <option value="10">显示前10个</option>
-                    <option value="20" selected>显示前20个</option>
-                    <option value="30">显示前30个</option>
-                    <option value="50">显示前50个</option>
-                </select>
-                <label>
-                    <input type="checkbox" id="show-loser-industries"> 显示跌幅行业
-                </label>
-            </div>
-            <div id="industry-data-container">
-                <p>点击上方按钮加载行业数据...</p>
-            </div>
-
-            <!-- 行业走势图部分 -->
-            <h2>行业板块走势对比图</h2>
-
-            <!-- 行业选择区域 -->
-            <div class="industry-chart-controls">
-                <div class="control-section">
-                    <h3>选择行业（最多10个）：</h3>
-                    <div id="industry-checkboxes" class="industry-checkboxes-grid">
-                        <!-- 动态加载行业复选框 -->
-                        <p style="color: #999;">加载中...</p>
-                    </div>
-                </div>
-
-                <!-- 时间周期选择 -->
-                <div class="control-section">
-                    <h3>时间周期：</h3>
-                    <div class="period-buttons">
-                        <button class="period-btn" data-period="30">近1月</button>
-                        <button class="period-btn" data-period="90">近3月</button>
-                        <button class="period-btn" data-period="180">近半年</button>
-                        <button class="period-btn active" data-period="365">近1年</button>
-                        <button class="period-btn" data-period="1825">近5年</button>
-                    </div>
-                </div>
-
-                <!-- 操作按钮 -->
-                <div class="control-section">
-                    <button id="render-chart-btn" class="primary-btn">生成图表</button>
-                    <button id="clear-selection-btn" class="secondary-btn">清除选择</button>
-                    <span id="selected-count" style="margin-left: 15px; color: #666;">已选择: 0 个行业</span>
-                </div>
-            </div>
-
-            <!-- 图表容器 -->
-            <div id="industry-chart-container" style="width: 100%; height: 600px; margin-top: 20px; border: 1px solid #ddd; border-radius: 4px;">
-                <div style="display: flex; align-items: center; justify-content: center; height: 100%; color: #99;">
-                    请选择行业并点击"生成图表"按钮
-                </div>
-            </div>
-        </div> <!-- 行业板块页面结束 -->
-
+        
         <!-- 指数统计页面 -->
         <div id="index-monitor-page" class="page-content">
             <h2>指数数据统计</h2>
@@ -241,17 +318,17 @@
 
             <!-- 指数对比图表 -->
             <h2>指数走势对比图（最近30天前28名）</h2>
-
+            
             <!-- 指数选择区域 -->
             <div class="index-chart-controls">
                 <div class="control-section">
                     <h3>选择指数（最多10个）：</h3>
-                    <div id="index-checkboxes" class="industry-checkboxes-grid">
+                    <div id="index-checkboxes" class="checkboxes-grid">
                         <!-- 动态加载指数复选框 -->
                         <p style="color: #999;">加载中...</p>
                     </div>
                 </div>
-
+                
                 <!-- 时间周期选择 -->
                 <div class="control-section">
                     <h3>时间周期：</h3>
@@ -263,7 +340,7 @@
                         <button class="period-btn" data-period="1825">近5年</button>
                     </div>
                 </div>
-
+                
                 <!-- 操作按钮 -->
                 <div class="control-section">
                     <button id="render-index-chart-btn" class="primary-btn">生成图表</button>
@@ -271,7 +348,7 @@
                     <span id="index-selected-count" style="margin-left: 15px; color: #666;">已选择: 0 个指数</span>
                 </div>
             </div>
-
+            
             <!-- 图表容器 -->
             <div id="index-chart-container" style="width: 100%; height: 600px; margin-top: 20px; border: 1px solid #ddd; border-radius: 4px;">
                 <div style="display: flex; align-items: center; justify-content: center; height: 100%; color: #99;">
@@ -319,7 +396,7 @@
             <div class="fund-chart-controls">
                 <div class="control-section">
                     <h3>选择基金（最多10个）：</h3>
-                    <div id="fund-checkboxes" class="industry-checkboxes-grid">
+                    <div id="fund-checkboxes" class="checkboxes-grid">
                         <!-- 动态加载基金复选框 -->
                         <p style="color: #999;">加载中...</p>
                     </div>
@@ -360,13 +437,11 @@
         <div style="display: flex; flex-wrap: wrap; gap: 20px;">
             <div style="flex: 1; min-width: 200px;">
                 <h3 style="margin-top: 0; color: #555;">微信消息推送服务</h3>
-                <!-- 请修改为您的实际服务地址 -->
-                <p><a href="https://your-message-server.example.com/" target="_blank" style="color: #1890ff; text-decoration: none;">访问微信消息推送服务</a></p>
+                <p><a href="https://your-message-server/" target="_blank" style="color: #1890ff; text-decoration: none;">访问微信消息推送服务</a></p>
             </div>
             <div style="flex: 1; min-width: 200px;">
                 <h3 style="margin-top: 0; color: #555;">历史备份数据</h3>
-                <!-- 请修改为您的实际备份地址 -->
-                <p><a href="https://your-backup-server.example.com/stocks/" target="_blank" style="color: #1890ff; text-decoration: none;">访问历史备份数据</a></p>
+                <p><a href="https://your-data-server/eastmoney/" target="_blank" style="color: #1890ff; text-decoration: none;">访问历史备份数据</a></p>
             </div>
 
             <div style="flex: 1; min-width: 200px;">
@@ -386,71 +461,18 @@
     <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
     <script src="/static/js/modules/stock_view.js"></script>
     <script src="/static/js/modules/analyst_view.js"></script>
-    <script src="/static/js/modules/industry_view.js"></script>
     <script src="/static/js/modules/index_view.js"></script>
     <script src="/static/js/modules/fund_view.js"></script>
-
+    <script src="/static/js/modules/picker_view.js"></script>
+    <script src="/static/js/modules/valuation_view.js"></script>
+    <script src="/static/js/modules/market_view.js"></script>
+    
     <!-- 页面按钮事件绑定 -->
     <script>
         // 页面加载完成后绑定按钮事件
-        document.addEventListener('DOMContentLoaded', function() {
-            // 检查行业页面是否启用
-            const checkIndustryPageEnabled = function() {
-                // 通过AJAX获取配置
-                fetch('/api/industry_page_enabled')
-                .then(response => response.json())
-                .then(data => {
-                    const industryEnabled = data.industry_page_enabled !== undefined ? data.industry_page_enabled : true;
-                    const industryPageElement = document.getElementById('industry-index-page');
-                    const industryNavButton = document.querySelector('[data-page="industry-index"]');
-
-                    if (!industryEnabled) {
-                        // 隐藏行业板块页面
-                        if (industryPageElement) {
-                            industryPageElement.style.display = 'none';
-                        }
-                        // 隐藏行业板块导航按钮
-                        if (industryNavButton) {
-                            industryNavButton.style.display = 'none';
-                        }
-                        // 如果当前显示的是行业页面，则切换到第一个页面
-                        const activePage = document.querySelector('.page-content.active-page');
-                        if (activePage && activePage.id === 'industry-index-page') {
-                            const firstPage = document.querySelector('.page-content');
-                            if (firstPage) {
-                                firstPage.classList.add('active-page');
-                                // 隐藏其他页面
-                                document.querySelectorAll('.page-content').forEach(page => {
-                                    if (page !== firstPage) {
-                                        page.classList.remove('active-page');
-                                    }
-                                });
-                                // 更新导航按钮状态
-                                document.querySelectorAll('.nav-btn').forEach(btn => {
-                                    btn.classList.remove('active');
-                                });
-                                document.querySelector('.nav-btn[data-page="stock-monitor"]').classList.add('active');
-                            }
-                        }
-                    }
-                })
-                .catch(error => {
-                    console.error('获取设置失败:', error);
-                    // 如果获取失败，默认启用行业页面
-                    const industryPageElement = document.getElementById('industry-index-page');
-                    const industryNavButton = document.querySelector('[data-page="industry-index"]');
-                    if (industryPageElement) {
-                        industryPageElement.style.display = 'block';
-                    }
-                    if (industryNavButton) {
-                        industryNavButton.style.display = 'inline-block';
-                    }
-                });
-            };
-
-            // 页面加载时检查行业页面启用状态
-            checkIndustryPageEnabled();
-
+        document.addEventListener('DOMContentLoaded', function() {            // 页面加载时检查行业页面启用状态
+            
+            
         });
     </script>
 </body>

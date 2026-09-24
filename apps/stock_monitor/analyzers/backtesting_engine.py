@@ -9,7 +9,7 @@ import numpy as np
 from datetime import datetime, timedelta
 from config import setup_logger
 logger = setup_logger(__name__)
-from trend_trading_analyzer import TrendTradingAnalyzer
+from .trend_trading_analyzer import TrendTradingAnalyzer
 
 class BacktestingEngine:
     """

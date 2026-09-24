@@ -85,8 +85,7 @@ class TrendTradingAnalyzer:
             report = self._generate_report(stock_code, stock_name, latest, analysis, trading_signals)
 
             # 返回结构化数据
-            return {
-                'success': True,
+            payload = {
                 'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                 # 当前价格数据 - 优先使用实时价格
                 'current_data': {
@@ -151,10 +150,12 @@ class TrendTradingAnalyzer:
                 # 文本报告（保持兼容）
                 'report': report
             }
+            result = {'success': True, 'data': payload}
 
-            # 缓存结果
+            # 缓存结果（原实现写在 return 之后，永远不会执行）
             set_stock_cache_data(cache_key, result)
             logger.info(f"趋势分析结果已缓存：{stock_code}")
+            return result
 
         except Exception as e:
             logger.error(f"分析失败：{e}")

@@ -7,9 +7,9 @@ const CONSTANTS = {
     NOTIFICATION_TIMEOUT: 3000,
     API_ENDPOINTS: {
         STOCKS: '/api/stocks',
-        SETTINGS: '/api/settings',
-        NOTIFICATIONS: '/api/notification_settings',
-        GLOBAL_NOTIFICATION_ENABLED: '/api/global_notification_enabled'
+        SETTINGS: '/api/stocks/settings',
+        NOTIFICATIONS: '/api/stocks/notification_settings',
+        GLOBAL_NOTIFICATION_ENABLED: '/api/stocks/global_notification_enabled'
     }
 };
 
@@ -32,16 +32,20 @@ function handleError(operation, error) {
 }
 
 async function apiCall(endpoint, options = {}) {
+    const { timeout = 15000, ...init } = options;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeout);
     try {
         const response = await fetch(endpoint, {
+            ...init,
             headers: {
                 'Content-Type': 'application/json',
-                ...options.headers
+                ...(init.headers || {})
             },
-            ...options
+            signal: controller.signal
         });
 
-        const data = await response.json();
+        const data = await response.json().catch(() => ({}));
 
         if (!response.ok) {
             throw new Error(data.message || `HTTP error! status: ${response.status}`);
@@ -49,42 +53,35 @@ async function apiCall(endpoint, options = {}) {
 
         return data;
     } catch (error) {
+        if (error && error.name === 'AbortError') {
+            throw new Error('请求超时，请稍后重试');
+        }
         throw error;
+    } finally {
+        clearTimeout(timer);
     }
 }
 
-// 本地存储相关函数
-function saveSettingsToStorage(settings) {
-    try {
-        localStorage.setItem('stockMonitorSettings', JSON.stringify(settings));
-    } catch (error) {
-        console.warn('保存设置到本地存储失败:', error);
-    }
-}
+// 开市时段：由后端 config.ini 提供（GET /api/stocks/settings）。
+// 原为页面上可编辑并缓存到 localStorage，现统一放配置、页面只读。
+const DEFAULT_MARKET_TIMES = { start: '09:30', end: '16:00' };
+let marketTimes = { ...DEFAULT_MARKET_TIMES };
 
-function loadSettingsFromStorage() {
-    try {
-        const saved = localStorage.getItem('stockMonitorSettings');
-        return saved ? JSON.parse(saved) : null;
-    } catch (error) {
-        console.warn('从本地存储加载设置失败:', error);
-        return null;
-    }
+function loadMarketTimes() {
+    return apiCall(CONSTANTS.API_ENDPOINTS.SETTINGS)
+        .then(resp => {
+            const s = (resp && resp.data) || {};
+            marketTimes = {
+                start: s.market_open_start || DEFAULT_MARKET_TIMES.start,
+                end: s.market_open_end || DEFAULT_MARKET_TIMES.end
+            };
+        })
+        .catch(err => {
+            console.warn('读取开市时段失败，使用默认值:', err);
+        });
 }
 
 // 保存当前设置到本地存储
-function saveCurrentSettings() {
-    const settings = {
-        checkInterval: document.getElementById('check-interval')?.value,
-        marketOpenStart: document.getElementById('market-open-start')?.value,
-        marketOpenEnd: document.getElementById('market-open-end')?.value
-    };
-
-    if (settings.checkInterval || settings.marketOpenStart || settings.marketOpenEnd) {
-        saveSettingsToStorage(settings);
-    }
-}
-
 // 输入验证函数
 function validateStockData(stockData) {
     const errors = [];
@@ -147,8 +144,9 @@ document.addEventListener('DOMContentLoaded', function() {
 
     // 加载股票列表
     loadStocks();
-    loadSettings();
     loadNotificationSettings(); // 加载消息发送设置
+    // 读取开市时段（config.ini）后再启动自动刷新
+    loadMarketTimes().then(startAutoRefresh);
 
     // 添加股票表单提交
     const addStockForm = document.getElementById('add-stock-form');
@@ -206,44 +204,7 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
 
-    // 设置表单提交
-    const settingsForm = document.getElementById('settings-form');
-    if (settingsForm) {
-        settingsForm.addEventListener('submit', async function(e) {
-            e.preventDefault();
-
-            try {
-                const settingsData = {
-                    check_interval: parseInt(document.getElementById('check-interval').value),
-                    market_open_start: document.getElementById('market-open-start').value,
-                    market_open_end: document.getElementById('market-open-end').value
-                };
-
-                const result = await apiCall(CONSTANTS.API_ENDPOINTS.SETTINGS, {
-                    method: 'POST',
-                    body: JSON.stringify(settingsData)
-                });
-
-                if (result.success) {
-                    showMessage('设置保存成功', 'success');
-                    // 保存到本地存储
-                    saveSettingsToStorage({
-                        checkInterval: settingsData.check_interval,
-                        marketOpenStart: settingsData.market_open_start,
-                        marketOpenEnd: settingsData.market_open_end
-                    });
-
-                    // 重启自动刷新以应用新的时间设置
-                    stopAutoRefresh();
-                    startAutoRefresh();
-                } else {
-                    showMessage(result.message, 'error');
-                }
-            } catch (error) {
-                handleError('保存设置', error);
-            }
-        });
-    }
+    // 设置表单已移除（check_interval / 开市时段改为 config.ini 配置，页面只读）
 
     // 移除"立即查询"按钮
     const refreshAllBtn = document.getElementById('refresh-all-btn');
@@ -279,8 +240,7 @@ async function analyzeTrendStock(code, name) {
         }
 
         // 直接调用趋势分析API
-        const response = await fetch(`/api/trend_analysis/${code}?name=${encodeURIComponent(name)}`);
-        const data = await response.json();
+        const data = await apiCall(`/api/stocks/${code}/trend_analysis?name=${encodeURIComponent(name)}`);
 
         // 隐藏加载状态
         hideTrendLoadingState(code);
@@ -290,7 +250,7 @@ async function analyzeTrendStock(code, name) {
         }
 
         if (data.success) {
-            showTrendAnalysisModal(code, name, data.report, data.timestamp, data.trading_signals);
+            showTrendAnalysisModal(code, name, data.data.report, data.data.timestamp, data.data.trading_signals);
         } else {
             showMessage(`趋势分析失败: ${data.message}`, 'error');
         }
@@ -567,8 +527,7 @@ async function showKlineChart(code, name) {
         }
 
         // 调用 K 线数据 API（默认 365 天）
-        const response = await fetch(`/api/stocks/${code}/kline?period=365`);
-        const data = await response.json();
+        const data = await apiCall(`/api/stocks/${code}/kline?period=365`);
 
         // 隐藏加载状态
         hideKlineLoadingState(code);
@@ -1052,56 +1011,14 @@ window.addEventListener('beforeunload', function() {
 
 
 // 添加股票分组功能
-function addStockGroup(groupName) {
-    // 创建股票分组
-    const groups = JSON.parse(localStorage.getItem('stockGroups') || '{}');
-    if (!groups[groupName]) {
-        groups[groupName] = [];
-        localStorage.setItem('stockGroups', JSON.stringify(groups));
-        return true;
-    }
-    return false;
-}
-
 // 获取所有股票分组
 function getAllStockGroups() {
     return JSON.parse(localStorage.getItem('stockGroups') || '{}');
 }
 
 // 将股票添加到分组
-function addStockToGroup(stockCode, groupName) {
-    const groups = getAllStockGroups();
-    if (!groups[groupName]) {
-        groups[groupName] = [];
-    }
-    if (!groups[groupName].includes(stockCode)) {
-        groups[groupName].push(stockCode);
-        localStorage.setItem('stockGroups', JSON.stringify(groups));
-        return true;
-    }
-    return false;
-}
-
 // 从分组中移除股票
-function removeStockFromGroup(stockCode, groupName) {
-    const groups = getAllStockGroups();
-    if (groups[groupName]) {
-        const index = groups[groupName].indexOf(stockCode);
-        if (index > -1) {
-            groups[groupName].splice(index, 1);
-            localStorage.setItem('stockGroups', JSON.stringify(groups));
-            return true;
-        }
-    }
-    return false;
-}
-
 // 获取分组中的股票
-function getStocksInGroup(groupName) {
-    const groups = getAllStockGroups();
-    return groups[groupName] || [];
-}
-
 // 自定义列功能
 function getVisibleColumns() {
     // 获取用户设置的可见列，如果没有设置则使用默认值
@@ -1123,26 +1040,7 @@ function getVisibleColumns() {
 }
 
 // 保存可见列设置
-function saveVisibleColumns(columns) {
-    localStorage.setItem('stockVisibleColumns', JSON.stringify(columns));
-}
-
 // 更新股票列表显示的列
-function updateColumnVisibility() {
-    const visibleColumns = getVisibleColumns();
-    const stockItems = document.querySelectorAll('.stock-item');
-
-    stockItems.forEach(item => {
-        // 根据可见列设置显示/隐藏相应元素
-        // 这里需要根据实际的DOM结构调整
-        const stockInfo = item.querySelector('.stock-info');
-        if (stockInfo) {
-            // 更新显示内容以匹配用户选择的列
-            // 这是一个简化版本，实际实现需要更详细的DOM操作
-        }
-    });
-}
-
 /**
  * 初始化页面导航
  */
@@ -1164,7 +1062,6 @@ function initPageNavigation() {
 // 模块初始化状态管理
 const moduleInitializationStatus = {
     'analyst-view': false,
-    'industry-index': false,
     'index-monitor': false,
     'fund-monitor': false
 };
@@ -1246,12 +1143,6 @@ function showPage(pageId) {
             stopAutoRefresh();
             // 按需初始化分析师页面
             initializeAnalystPage();
-            break;
-        case 'industry-index':
-            // 停止自动刷新，节省资源
-            stopAutoRefresh();
-            // 按需初始化行业页面
-            initializeIndustryPage();
             break;
         case 'index-monitor':
             // 停止自动刷新，节省资源
@@ -1361,37 +1252,6 @@ function initializeAnalystPage() {
 }
 
 /**
- * 按需初始化行业页面
- */
-function initializeIndustryPage() {
-    if (moduleInitializationStatus['industry-index']) {
-        console.log('行业页面已初始化，跳过重复初始化');
-        return;
-    }
-
-    console.log('开始初始化行业页面');
-
-    // 调用industry_view.js的初始化函数
-    if (typeof initIndustryChartPage === 'function') {
-        initIndustryChartPage();
-    }
-
-    // 绑定行业页面事件
-    const refreshIndustryBtn = document.getElementById('refresh-industry-btn');
-    if (refreshIndustryBtn && !refreshIndustryBtn.hasAttribute('data-initialized')) {
-        refreshIndustryBtn.addEventListener('click', function() {
-            if (typeof loadIndustryData === 'function') {
-                loadIndustryData();
-            }
-        });
-        refreshIndustryBtn.setAttribute('data-initialized', 'true');
-    }
-
-    moduleInitializationStatus['industry-index'] = true;
-    console.log('行业页面初始化完成');
-}
-
-/**
  * 按需初始化指数页面
  */
 function initializeIndexPage() {
@@ -1451,11 +1311,10 @@ function initializeIndexPage() {
  * 加载通知设置
  */
 function loadNotificationSettings() {
-    fetch(CONSTANTS.API_ENDPOINTS.NOTIFICATIONS)
-    .then(response => response.json())
+    apiCall(CONSTANTS.API_ENDPOINTS.NOTIFICATIONS)
     .then(data => {
         // 更新全局消息发送开关按钮的显示状态
-        updateGlobalNotificationButton(data.global_notification_enabled);
+        updateGlobalNotificationButton(data.data.global_notification_enabled);
     })
     .catch(error => {
         console.error('加载消息发送设置失败:', error);
@@ -1478,10 +1337,9 @@ function updateGlobalNotificationButton(enabled) {
  * 切换全局通知状态
  */
 function toggleGlobalNotification() {
-    fetch(CONSTANTS.API_ENDPOINTS.NOTIFICATIONS)
-    .then(response => response.json())
+    apiCall(CONSTANTS.API_ENDPOINTS.NOTIFICATIONS)
     .then(async data => {
-        const newStatus = !data.global_notification_enabled;
+        const newStatus = !data.data.global_notification_enabled;
 
         const result = await apiCall(CONSTANTS.API_ENDPOINTS.GLOBAL_NOTIFICATION_ENABLED, {
             method: 'PUT',
@@ -1507,10 +1365,9 @@ function toggleGlobalNotification() {
  * @param {string} code - 股票代码
  */
 function toggleStockNotification(code) {
-    fetch(CONSTANTS.API_ENDPOINTS.NOTIFICATIONS)
-    .then(response => response.json())
+    apiCall(CONSTANTS.API_ENDPOINTS.NOTIFICATIONS)
     .then(async settings => {
-        const currentStatus = settings.stock_notification_enabled[code] !== undefined ? settings.stock_notification_enabled[code] : true;
+        const currentStatus = settings.data.stock_notification_enabled[code] !== undefined ? settings.stock_notification_enabled[code] : true;
         const newStatus = !currentStatus;
 
         const result = await apiCall(`${CONSTANTS.API_ENDPOINTS.STOCKS}/${code}/notification_enabled`, {
@@ -1544,27 +1401,26 @@ function loadStocks() {
     const stocksList = document.getElementById('stocks-list');
     stocksList.innerHTML = '<div class="loading">加载中...</div>';
 
-    fetch(CONSTANTS.API_ENDPOINTS.STOCKS)
-    .then(response => response.json())
+    apiCall(CONSTANTS.API_ENDPOINTS.STOCKS)
     .then(async data => {
         stocksList.innerHTML = '';
 
-        if (data.stocks.length === 0) {
+        if (data.data.length === 0) {
             stocksList.innerHTML = '<p>暂无监控股票</p>';
             return;
         }
 
         try {
             // 获取消息发送设置
-            const notificationSettings = await fetch(CONSTANTS.API_ENDPOINTS.NOTIFICATIONS).then(res => res.json());
+            const notificationSettings = await apiCall(CONSTANTS.API_ENDPOINTS.NOTIFICATIONS);
 
             // 将股票分为开启消息和关闭消息两组
             const enabledStocks = [];
             const disabledStocks = [];
 
-            data.stocks.forEach(stock => {
-                const isNotificationEnabled = notificationSettings.stock_notification_enabled[stock.code] !== undefined ?
-                    notificationSettings.stock_notification_enabled[stock.code] : true;
+            data.data.forEach(stock => {
+                const isNotificationEnabled = notificationSettings.data.stock_notification_enabled[stock.code] !== undefined ?
+                    notificationSettings.data.stock_notification_enabled[stock.code] : true;
 
                 if (isNotificationEnabled) {
                     enabledStocks.push({stock, isNotificationEnabled});
@@ -1614,7 +1470,7 @@ function loadStocks() {
         } catch (error) {
             console.error('获取消息发送设置失败:', error);
             // 如果获取失败，按原有逻辑处理，使用默认开启状态
-            data.stocks.forEach(stock => {
+            data.data.forEach(stock => {
                 const stockItem = createStockItem(stock, true);
                 stocksList.appendChild(stockItem);
             });
@@ -1622,46 +1478,6 @@ function loadStocks() {
     })
     .catch(error => {
         stocksList.innerHTML = `<div class="error">加载股票列表失败: ${error.message}</div>`;
-    });
-}
-
-/**
- * 加载设置
- */
-function loadSettings() {
-    // 首先尝试从本地存储加载设置
-    const localSettings = loadSettingsFromStorage();
-    if (localSettings) {
-        if (localSettings.checkInterval) document.getElementById('check-interval').value = localSettings.checkInterval;
-        if (localSettings.marketOpenStart) document.getElementById('market-open-start').value = localSettings.marketOpenStart;
-        if (localSettings.marketOpenEnd) document.getElementById('market-open-end').value = localSettings.marketOpenEnd;
-
-        // 重启自动刷新以应用新的时间设置
-        stopAutoRefresh();
-        startAutoRefresh();
-    }
-
-    // 然后从服务器加载设置并覆盖本地值
-    fetch(CONSTANTS.API_ENDPOINTS.SETTINGS)
-    .then(response => response.json())
-    .then(settings => {
-        document.getElementById('check-interval').value = settings.check_interval;
-        document.getElementById('market-open-start').value = settings.market_open_start;
-        document.getElementById('market-open-end').value = settings.market_open_end;
-
-        // 同时保存到本地存储
-        saveSettingsToStorage({
-            checkInterval: settings.check_interval,
-            marketOpenStart: settings.market_open_start,
-            marketOpenEnd: settings.market_open_end
-        });
-
-        // 重启自动刷新以应用新的时间设置
-        stopAutoRefresh();
-        startAutoRefresh();
-    })
-    .catch(error => {
-        console.error('加载设置失败:', error);
     });
 }
 
@@ -1694,10 +1510,9 @@ function deleteStock(code) {
  */
 function editStock(code) {
     // 获取当前股票信息
-    fetch(CONSTANTS.API_ENDPOINTS.STOCKS)
-    .then(response => response.json())
+    apiCall(CONSTANTS.API_ENDPOINTS.STOCKS)
     .then(data => {
-        const stock = data.stocks.find(s => s.code === code);
+        const stock = data.data.find(s => s.code === code);
         if (!stock) {
             showMessage(`未找到股票 ${code}`, 'error');
             return;
@@ -1945,8 +1760,7 @@ function formatAlertsInput(alerts, type) {
  */
 function refreshStockData(code) {
     // 刷新单个股票的实时数据
-    fetch(`${CONSTANTS.API_ENDPOINTS.STOCKS}/${code}/current_data`)
-    .then(response => response.json())
+    apiCall(`${CONSTANTS.API_ENDPOINTS.STOCKS}/${code}/current_data`)
     .then(data => {
         if (data.success) {
             const currentData = data.data;
@@ -1972,8 +1786,7 @@ function refreshStockData(code) {
  */
 function refreshAllStocksData() {
     // 刷新所有股票的实时数据
-    fetch(`${CONSTANTS.API_ENDPOINTS.STOCKS}/current_data`)
-    .then(response => response.json())
+    apiCall(`${CONSTANTS.API_ENDPOINTS.STOCKS}/current_data`)
     .then(data => {
         if (data.success) {
             const allData = data.data;
@@ -2035,11 +1848,10 @@ async function loadStockClockDirections() {
  */
 async function fetchClockDirection(code) {
     try {
-        const response = await fetch(`/api/trend_analysis/${code}?name=`);
-        const data = await response.json();
+        const data = await apiCall(`/api/stocks/${code}/trend_analysis?name=`);
 
-        if (data.success && data.trend_analysis && data.trend_analysis.direction) {
-            const trendAnalysis = data.trend_analysis;
+        if (data.success && data.data && data.data.trend_analysis && data.data.trend_analysis.direction) {
+            const trendAnalysis = data.data.trend_analysis;
             const trendDirection = trendAnalysis.direction;
             const clockInfo = parseClockDirection(trendDirection);
 
@@ -2088,9 +1900,9 @@ function isMarketTime() {
     const minutes = now.getMinutes();
     const time = hours * 60 + minutes;
 
-    // 从页面设置中获取监控开始和结束时间
-    const startTimeStr = document.getElementById('market-open-start')?.value || '09:30';
-    const endTimeStr = document.getElementById('market-open-end')?.value || '15:00';
+    // 开市时段来自后端 config.ini（loadMarketTimes() 已预取）
+    const startTimeStr = marketTimes.start;
+    const endTimeStr = marketTimes.end;
 
     // 解析时间字符串为分钟数
     const [startHour, startMinute] = startTimeStr.split(':').map(Number);

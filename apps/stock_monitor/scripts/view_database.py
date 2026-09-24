@@ -384,7 +384,11 @@ def clear_table_data(conn, table_name):
         return False
 
 
-from config import get_path
+from _bootstrap import ensure_project_root
+
+ensure_project_root()
+
+from config import get_path  # noqa: E402
 
 
 def main():
@@ -402,12 +406,12 @@ def main():
     # 检查数据库文件是否存在
     if not os.path.exists(db_path):
         print(f"数据库文件不存在: {db_path}")
-        # 尝试其他可能的路径
+        # 兜底：按「项目根/run」再找一遍（本机开发约定）
+        _root = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..", "..")
+        )
         possible_paths = [
-            os.path.join(
-                os.path.dirname(__file__), "../run/stock_monitor/database/cache.db"
-            ),
-            os.path.abspath("../run/stock_monitor/database/cache.db"),
+            os.path.join(_root, "run", "stock_monitor_data", "database", "cache.db"),
             "cache.db",
         ]
 

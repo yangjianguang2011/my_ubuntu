@@ -4,6 +4,7 @@ import json
 import os
 import random
 import re
+import sys
 import time
 import webbrowser
 import smtplib
@@ -18,6 +19,15 @@ from typing import Dict, List, Tuple, Optional, Union
 import pytz
 import requests
 import yaml
+
+# 允许直接运行本脚本（python apps/news/crawl_save_news.py）：
+# 把 apps/ 加入 sys.path，才能 import config
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+
+from config import get_path  # noqa: E402
+
+# 新闻产出目录（容器内 /data/news；本机开发映射到 <项目根>/run/news）
+NEWS_DATA_DIR = get_path("news", "data_dir", "/data/news")
 
 
 VERSION = "3.0.5"
@@ -254,9 +264,9 @@ def get_output_path(subfolder: str, filename: str) -> str:
     date_folder = format_date_folder()
     # 如果subfolder为空，则直接保存到日期文件夹下，否则保存到日期文件夹下的子文件夹中
     if subfolder:
-        output_dir = Path("/data/news") / date_folder / subfolder
+        output_dir = Path(NEWS_DATA_DIR) / date_folder / subfolder
     else:
-        output_dir = Path("/data/news") / date_folder
+        output_dir = Path(NEWS_DATA_DIR) / date_folder
     ensure_directory_exists(str(output_dir))
     return str(output_dir / filename)
 
@@ -291,7 +301,7 @@ def check_version_update(
                 if len(parts) != 3:
                     raise ValueError("版本号格式不正确")
                 return int(parts[0]), int(parts[1]), int(parts[2])
-            except:
+            except Exception:
                 return 0, 0, 0
 
         current_tuple = parse_version(current_version)
@@ -303,18 +313,6 @@ def check_version_update(
     except Exception as e:
         print(f"版本检查失败: {e}")
         return False, None
-
-
-def is_first_crawl_today() -> bool:
-    """检测是否是当天第一次爬取"""
-    date_folder = format_date_folder()
-    txt_dir = Path("output") / date_folder / "txt"
-
-    if not txt_dir.exists():
-        return True
-
-    files = sorted([f for f in txt_dir.iterdir() if f.suffix == ".txt"])
-    return len(files) <= 1
 
 
 def html_escape(text: str) -> str:
@@ -908,80 +906,6 @@ def detect_latest_new_titles(current_platform_ids: Optional[List[str]] = None) -
 
 
 # === 统计和分析 ===
-def calculate_news_weight(
-    title_data: Dict, rank_threshold: int = CONFIG["RANK_THRESHOLD"]
-) -> float:
-    """计算新闻权重，用于排序"""
-    ranks = title_data.get("ranks", [])
-    if not ranks:
-        return 0.0
-
-    count = title_data.get("count", len(ranks))
-    weight_config = CONFIG["WEIGHT_CONFIG"]
-
-    # 排名权重：Σ(11 - min(rank, 10)) / 出现次数
-    rank_scores = []
-    for rank in ranks:
-        score = 11 - min(rank, 10)
-        rank_scores.append(score)
-
-    rank_weight = sum(rank_scores) / len(ranks) if ranks else 0
-
-    # 频次权重：min(出现次数, 10) × 10
-    frequency_weight = min(count, 10) * 10
-
-    # 热度加成：高排名次数 / 总出现次数 × 100
-    high_rank_count = sum(1 for rank in ranks if rank <= rank_threshold)
-    hotness_ratio = high_rank_count / len(ranks) if ranks else 0
-    hotness_weight = hotness_ratio * 100
-
-    total_weight = (
-        rank_weight * weight_config["RANK_WEIGHT"]
-        + frequency_weight * weight_config["FREQUENCY_WEIGHT"]
-        + hotness_weight * weight_config["HOTNESS_WEIGHT"]
-    )
-
-    return total_weight
-
-
-def matches_word_groups(
-    title: str, word_groups: List[Dict], filter_words: List[str]
-) -> bool:
-    """检查标题是否匹配词组规则"""
-    # 如果没有配置词组，则匹配所有标题（支持显示全部新闻）
-    if not word_groups:
-        return True
-
-    title_lower = title.lower()
-
-    # 过滤词检查
-    if any(filter_word.lower() in title_lower for filter_word in filter_words):
-        return False
-
-    # 词组匹配检查
-    for group in word_groups:
-        required_words = group["required"]
-        normal_words = group["normal"]
-
-        # 必须词检查
-        if required_words:
-            all_required_present = all(
-                req_word.lower() in title_lower for req_word in required_words
-            )
-            if not all_required_present:
-                continue
-
-        # 普通词检查
-        if normal_words:
-            any_normal_present = any(
-                normal_word.lower() in title_lower for normal_word in normal_words
-            )
-            if not any_normal_present:
-                continue
-
-        return True
-
-    return False
 
 
 def format_time_display(first_time: str, last_time: str) -> str:
@@ -1593,186 +1517,6 @@ def render_html_content(
     </html>
     """
     return html
-
-
-def render_feishu_content(
-    report_data: Dict, update_info: Optional[Dict] = None, mode: str = "daily"
-) -> str:
-    """渲染飞书内容"""
-    text_content = ""
-
-    if report_data["stats"]:
-        text_content += f"📊 **热点词汇统计**\n\n"
-
-    total_count = len(report_data["stats"])
-
-    for i, stat in enumerate(report_data["stats"]):
-        word = stat["word"]
-        count = stat["count"]
-
-        sequence_display = f"<font color='grey'>[{i + 1}/{total_count}]</font>"
-
-        if count >= 10:
-            text_content += f"🔥 {sequence_display} **{word}** : <font color='red'>{count}</font> 条\n\n"
-        elif count >= 5:
-            text_content += f"📈 {sequence_display} **{word}** : <font color='orange'>{count}</font> 条\n\n"
-        else:
-            text_content += f"📌 {sequence_display} **{word}** : {count} 条\n\n"
-
-        for j, title_data in enumerate(stat["titles"], 1):
-            formatted_title = format_title_for_platform(
-                "feishu", title_data, show_source=True
-            )
-            text_content += f"  {j}. {formatted_title}\n"
-
-            if j < len(stat["titles"]):
-                text_content += "\n"
-
-        if i < len(report_data["stats"]) - 1:
-            text_content += f"\n{CONFIG['FEISHU_MESSAGE_SEPARATOR']}\n\n"
-
-    if not text_content:
-        if mode == "incremental":
-            mode_text = "增量模式下暂无新增匹配的热点词汇"
-        elif mode == "current":
-            mode_text = "当前榜单模式下暂无匹配的热点词汇"
-        else:
-            mode_text = "暂无匹配的热点词汇"
-        text_content = f"📭 {mode_text}\n\n"
-
-    if report_data["new_titles"]:
-        if text_content and "暂无匹配" not in text_content:
-            text_content += f"\n{CONFIG['FEISHU_MESSAGE_SEPARATOR']}\n\n"
-
-        text_content += (
-            f"🆕 **本次新增热点新闻** (共 {report_data['total_new_count']} 条)\n\n"
-        )
-
-        for source_data in report_data["new_titles"]:
-            text_content += (
-                f"**{source_data['source_name']}** ({len(source_data['titles'])} 条):\n"
-            )
-
-            for j, title_data in enumerate(source_data["titles"], 1):
-                title_data_copy = title_data.copy()
-                title_data_copy["is_new"] = False
-                formatted_title = format_title_for_platform(
-                    "feishu", title_data_copy, show_source=False
-                )
-                text_content += f"  {j}. {formatted_title}\n"
-
-            text_content += "\n"
-
-    if report_data["failed_ids"]:
-        if text_content and "暂无匹配" not in text_content:
-            text_content += f"\n{CONFIG['FEISHU_MESSAGE_SEPARATOR']}\n\n"
-
-        text_content += "⚠️ **数据获取失败的平台：**\n\n"
-        for i, id_value in enumerate(report_data["failed_ids"], 1):
-            text_content += f"  • <font color='red'>{id_value}</font>\n"
-
-    now = get_beijing_time()
-    text_content += (
-        f"\n\n<font color='grey'>更新时间：{now.strftime('%Y-%m-%d %H:%M:%S')}</font>"
-    )
-
-    if update_info:
-        text_content += f"\n<font color='grey'>TrendRadar 发现新版本 {update_info['remote_version']}，当前 {update_info['current_version']}</font>"
-
-    return text_content
-
-
-def render_dingtalk_content(
-    report_data: Dict, update_info: Optional[Dict] = None, mode: str = "daily"
-) -> str:
-    """渲染钉钉内容"""
-    text_content = ""
-
-    total_titles = sum(
-        len(stat["titles"]) for stat in report_data["stats"] if stat["count"] > 0
-    )
-    now = get_beijing_time()
-
-    text_content += f"**总新闻数：** {total_titles}\n\n"
-    text_content += f"**时间：** {now.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-    text_content += f"**类型：** 热点分析报告\n\n"
-
-    text_content += "---\n\n"
-
-    if report_data["stats"]:
-        text_content += f"📊 **热点词汇统计**\n\n"
-
-        total_count = len(report_data["stats"])
-
-        for i, stat in enumerate(report_data["stats"]):
-            word = stat["word"]
-            count = stat["count"]
-
-            sequence_display = f"[{i + 1}/{total_count}]"
-
-            if count >= 10:
-                text_content += f"🔥 {sequence_display} **{word}** : **{count}** 条\n\n"
-            elif count >= 5:
-                text_content += f"📈 {sequence_display} **{word}** : **{count}** 条\n\n"
-            else:
-                text_content += f"📌 {sequence_display} **{word}** : {count} 条\n\n"
-
-            for j, title_data in enumerate(stat["titles"], 1):
-                formatted_title = format_title_for_platform(
-                    "dingtalk", title_data, show_source=True
-                )
-                text_content += f"  {j}. {formatted_title}\n"
-
-                if j < len(stat["titles"]):
-                    text_content += "\n"
-
-            if i < len(report_data["stats"]) - 1:
-                text_content += f"\n---\n\n"
-
-    if not report_data["stats"]:
-        if mode == "incremental":
-            mode_text = "增量模式下暂无新增匹配的热点词汇"
-        elif mode == "current":
-            mode_text = "当前榜单模式下暂无匹配的热点词汇"
-        else:
-            mode_text = "暂无匹配的热点词汇"
-        text_content += f"📭 {mode_text}\n\n"
-
-    if report_data["new_titles"]:
-        if text_content and "暂无匹配" not in text_content:
-            text_content += f"\n---\n\n"
-
-        text_content += (
-            f"🆕 **本次新增热点新闻** (共 {report_data['total_new_count']} 条)\n\n"
-        )
-
-        for source_data in report_data["new_titles"]:
-            text_content += f"**{source_data['source_name']}** ({len(source_data['titles'])} 条):\n\n"
-
-            for j, title_data in enumerate(source_data["titles"], 1):
-                title_data_copy = title_data.copy()
-                title_data_copy["is_new"] = False
-                formatted_title = format_title_for_platform(
-                    "dingtalk", title_data_copy, show_source=False
-                )
-                text_content += f"  {j}. {formatted_title}\n"
-
-            text_content += "\n"
-
-    if report_data["failed_ids"]:
-        if text_content and "暂无匹配" not in text_content:
-            text_content += f"\n---\n\n"
-
-        text_content += "⚠️ **数据获取失败的平台：**\n\n"
-        for i, id_value in enumerate(report_data["failed_ids"], 1):
-            text_content += f"  • **{id_value}**\n"
-
-    text_content += f"\n\n> 更新时间：{now.strftime('%Y-%m-%d %H:%M:%S')}"
-
-    if update_info:
-        text_content += f"\n> TrendRadar 发现新版本 **{update_info['remote_version']}**，当前 **{update_info['current_version']}**"
-
-    return text_content
 
 
 def split_content_into_batches(
@@ -2934,7 +2678,7 @@ def send_to_ntfy(
                 )
                 try:
                     print(f"错误详情：{response.text}")
-                except:
+                except Exception:
                     pass
 
         except requests.exceptions.ConnectTimeout:

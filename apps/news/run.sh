@@ -1,15 +1,35 @@
 #!/bin/bash
 # News crawler execution script
 
-# 设置配置文件路径环境变量，确保Python脚本能找到配置文件
-export CONFIG_FILE="/root/apps/config.ini"
-
 set -euo pipefail
 
-SCRIPT_DIR="/root/apps/news"
+# 脚本目录自算（不依赖调用时的 cwd）
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# 配置文件：默认容器内路径；本机调试可用环境变量 CONFIG_FILE 覆盖
+CONFIG_FILE="${CONFIG_FILE:-/root/apps/config.ini}"
+export CONFIG_FILE
+
+# 读取 ini（精确匹配段名与键名）
+get_ini_value() {
+    local section="$1" key="$2" file="$3"
+    awk -F '=' -v section="$section" -v key="$key" '
+        /^[[:space:]]*\[/ { s=$1; gsub(/[][[:space:]]/, "", s); next }
+        s == section {
+            k=$1; gsub(/^[ \t]+|[ \t]+$/, "", k)
+            if (k == key) {
+                v=substr($0, index($0,"=")+1); gsub(/^[ \t]+|[ \t]+$/, "", v); print v; exit
+            }
+        }
+    ' "$file"
+}
+
 PYTHON_SCRIPT="crawl_save_news.py"
-DATA_DIR="/data/news"
-LOG_FILE="/var/log/news_crawler.log"
+DATA_DIR="$(get_ini_value news data_dir "$CONFIG_FILE")"
+DATA_DIR="${DATA_DIR:-/data/news}"
+LOG_DIR="$(get_ini_value paths log_dir "$CONFIG_FILE")"
+LOG_DIR="${LOG_DIR:-/data/logs}"
+LOG_FILE="$LOG_DIR/cron/news.log"
 TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
 
 log() {

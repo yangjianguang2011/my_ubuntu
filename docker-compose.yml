@@ -5,6 +5,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # 可选功能开关（默认关闭）。打开 OpenClaw 需要重建镜像：
+        #   ENABLE_OPENCLAW=1 docker compose build && docker compose up -d
+        ENABLE_OPENCLAW: "${ENABLE_OPENCLAW:-0}"
     container_name: ubuntu_openclaw
     ports:
       - "4400:80"      # Nginx Web 服务
@@ -13,14 +17,26 @@ services:
       - "38789:38789"
     volumes:
       - /vol1/1000/docker/my-ubuntu/run:/data           # 数据卷
+      - /vol1/1000/docker/my-ubuntu/apps/stockdb:/root/apps/stockdb   # stockdb SDK（pybao，含 stockdb.pyd）
       - /vol1/1009/paddle_mount:/paddle                 # PaddleOCR 模型
       - /vol1/1000/docker/openclaw:/root/.openclaw
     restart: unless-stopped
     privileged: true                                     # systemd 容器需要 privileged
+    extra_hosts:
+      # 让容器通过 docker 网关访问宿主机的 stockdb（原因见下方 STOCK_MONITOR_STOCKDB_HOST）
+      - "host.docker.internal:host-gateway"
     environment:
       - TZ=Asia/Shanghai
       - LOG_LEVEL=INFO
-      - PYTHONPATH=/root/apps/crawlers/xueqiu:/root/apps/crawlers/eastmoney:/root/apps
+      # 功能开关（默认关闭，代码保留）
+      - ENABLE_OPENCLAW=${ENABLE_OPENCLAW:-0}
+      - ENABLE_TELEGRAM=${ENABLE_TELEGRAM:-0}
+      # stockdb 跑在宿主机。容器不能用宿主 LAN IP（192.168.50.50）：
+      # fnOS 有策略路由 `from 192.168.50.50 lookup 10`，会把 stockdb 回包的源地址
+      # 192.168.50.50 经 LAN 网关出去，docker 网段永远收不到（连接超时）。
+      # host.docker.internal -> docker 网关，回包源是网关 IP，正常走网桥。
+      - STOCK_MONITOR_STOCKDB_HOST=host.docker.internal
+      - PYTHONPATH=/root/apps/eastmoney:/root/apps
     networks:
       - my_network
 

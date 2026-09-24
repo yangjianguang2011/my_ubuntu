@@ -1,5 +1,25 @@
+# -*- coding: utf-8 -*-
+"""分析师数据（东方财富，经 akshare）。
+
+口径说明（重要）
+================
+akshare 只有两个分析师接口：
+
+* ``stock_analyst_rank_em(year)``   —— 列表页排行，**只有 year 参数**
+  （即「年度排行」，全市场前 100 名）
+* ``stock_analyst_detail_em(...)``  —— 单分析师详情（最新跟踪 / 历史跟踪成份股）
+
+因此本模块**只支持年度排行**，口径与东方财富页面「{年}最新排行」一致。
+
+东方财富页面另有「3/6/12 个月排行」，那是**全市场**按对应收益率排序；
+akshare 无法复现。早期实现把「年度前 100 名」按 3/6/12 个月收益率**本地重排**再取前 N，
+得到的分析师集合与页面完全不同（导致统计结果对不上），故**不再这样做**。
+3/6/12 个月收益率只作为**展示字段**保留（数据本就在年度榜同一行里）。
+
+数据来源：akshare 的东财接口；字段名随年份变化（如 ``2026年收益率``），故年份一律动态取。
+"""
 import time
-from datetime import datetime
+from datetime import date, datetime, timedelta
 
 import akshare as ak
 
@@ -7,762 +27,378 @@ from config import setup_logger
 
 logger = setup_logger(__name__)
 
-# 使用混合缓存（内存+数据库），以SQLite作为二级缓存
-from ..core.cache_with_database import cache_system
+from ..core.cache_with_database import cache_system  # noqa: E402
+
+# 「最近更新」判定用的日期字段（按跟踪类型取第一个非空）
+_UPDATED_DATE_FIELDS = {
+    "最新跟踪成分股": ("最新评级日期", "调入日期"),  # 最近一次评级变动
+    "历史跟踪成分股": ("调出日期", "调入日期"),      # 最近被调出
+}
+DEFAULT_INDICATOR = "最新跟踪成分股"
 
 
-def _format_stock_symbol(symbol):
-    """
-    格式化股票代码，确保其带有正确的市场前缀
-    :param symbol: 股票代码，可能是纯数字或已带前缀的格式
-    :return: 格式化后的股票代码
-    """
-    if not symbol:
-        return symbol
-
-    # 如果已经包含市场前缀，直接返回
-    if symbol.startswith(("SH", "SZ", "BJ")):
-        return symbol.upper()
-
-    # 如果是纯数字，根据代码规则添加前缀
-    symbol = str(symbol).strip()
-    if symbol.startswith(("00", "15", "16", "18", "19", "20", "30", "39")):
-        # 深圳市场：00开头的股票（如000408是深圳市场股票）
-        return f"SZ{symbol}"
-    elif symbol.startswith(("50", "51", "60", "68")):
-        # 上海市场：60、68开头的股票
-        return f"SH{symbol}"
-    elif symbol.startswith("4"):
-        # 北交所：4开头的股票
-        return f"BJ{symbol}"
-    else:
-        # 默认为深圳市场（因为000408是深圳市场股票）
-        return f"SZ{symbol}"
+def _year() -> int:
+    """当前年度（排行榜口径；随年份动态变化）。"""
+    return datetime.now().year
 
 
-def _convert_dates_to_strings(obj):
-    """
-    递归地将对象中的日期类型转换为字符串，以便JSON序列化
-    :param obj: 需要处理的对象
-    :return: 处理后的对象
-    """
-    from datetime import date, datetime
-
-    import numpy as np
-    import pandas as pd
-
-    if isinstance(obj, dict):
-        return {key: _convert_dates_to_strings(value) for key, value in obj.items()}
-    elif isinstance(obj, list):
-        return [_convert_dates_to_strings(item) for item in obj]
-    elif isinstance(obj, (date, datetime)):
-        return obj.isoformat()
-    elif isinstance(obj, str):
-        # 检查是否为日期格式的字符串，如果是则保持不变
-        # 这样可以避免pandas错误地尝试将普通字符串当作日期处理
-        try:
-            # 尝试解析日期字符串，但不改变其格式
-            if "-" in obj and len(obj) >= 8:  # 简单检查是否可能是日期格式
-                parts = obj.split("-")
-                if len(parts) == 3 and all(part.isdigit() for part in parts):
-                    # 验证是否为有效日期，但返回原始字符串
-                    year, month, day = parts
-                    if 1 <= int(month) <= 12 and 1 <= int(day) <= 31:
-                        return obj  # 保持原始日期字符串格式
-        except:
-            pass  # 如果解析失败，继续下面的逻辑
-        return obj
-    elif isinstance(obj, pd.Timestamp):
-        return obj.isoformat() if hasattr(obj, "isoformat") else str(obj)
-    elif isinstance(obj, pd.Timedelta):
-        return str(obj)
-    elif obj is pd.NaT or obj is pd.NA:
-        return None
-    elif isinstance(obj, np.datetime64):
-        # 如果是 datetime64 类型且不是 NaT，则转换为字符串
-        if str(obj) != "NaT":
-            return str(obj)
-        else:
-            return None
-    elif isinstance(obj, np.ndarray) and np.issubdtype(obj.dtype, np.datetime64):
-        return [str(item) if str(item) != "NaT" else None for item in obj.tolist()]
-    else:
-        # 对于其他类型，只处理pandas的NA值
-        if hasattr(pd, "isna") and pd.isna(obj) and obj is not None:
-            return None
-        return obj
+# ---------------------------------------------------------------- 缓存
 
 
 def get_analyst_cached_data(cache_key, cache_duration=None):
-    """从分析师数据缓存获取数据"""
-    # 为了调试，我们添加一些日志
-    cached_data = cache_system.get_cached_data(cache_key, "analyst", cache_duration)
-    if cached_data is not None:
-        logger.debug(f"从缓存获取数据，缓存键: {cache_key}")
-    else:
-        logger.debug(f"缓存未命中，缓存键: {cache_key}")
-    return cached_data
+    """从分析师数据缓存获取数据。"""
+    cached = cache_system.get_cached_data(cache_key, "analyst", cache_duration)
+    logger.debug(f"{'命中' if cached is not None else '未命中'}缓存: {cache_key}")
+    return cached
 
 
 def set_analyst_cache_data(cache_key, data, cache_duration=None):
-    """设置分析师数据缓存"""
-    processed_data = _convert_dates_to_strings(data)
-    cache_system.set_cache_data(cache_key, processed_data, "analyst", cache_duration)
-    logger.debug(f"数据已缓存，缓存键: {cache_key}")
+    """写入分析师数据缓存（先做 JSON 安全化处理）。"""
+    cache_system.set_cache_data(
+        cache_key, _convert_dates_to_strings(data), "analyst", cache_duration
+    )
+    logger.debug(f"已缓存: {cache_key}")
 
 
-def save_analyst_history_data(stock_code, date, analyst_count):
-    """保存分析师历史数据到长期存储"""
+def _convert_dates_to_strings(obj):
+    """递归把日期/缺失值转成 JSON 可序列化的形式；其余类型原样返回。
+
+    缓存层用 ``json.dumps``，所以 numpy 标量、pandas 缺失值都必须在这里处理掉。
+    """
+    if isinstance(obj, dict):
+        return {k: _convert_dates_to_strings(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_convert_dates_to_strings(v) for v in obj]
+    if obj is None or isinstance(obj, (str, bool, int, float)):
+        return obj
+
+    # pandas / numpy 缺失值
     try:
-        # 构造唯一键
-        key = f"analyst_history:{stock_code}:{date}"
-        data = {"stock_code": stock_code, "date": date, "analyst_count": analyst_count}
-        # 存储到长期存储系统，永不过期
+        import pandas as pd
+
+        if obj is pd.NaT or pd.isna(obj):
+            return None
+    except (TypeError, ValueError, ImportError):
+        pass
+
+    if hasattr(obj, "isoformat"):          # datetime / date / pd.Timestamp
+        return obj.isoformat()
+    if hasattr(obj, "item"):               # numpy 标量（np.int64 / np.float64 / …）
+        try:
+            v = obj.item()
+            return v.isoformat() if hasattr(v, "isoformat") else v
+        except (ValueError, AttributeError):
+            pass
+    return str(obj)
+
+
+# ---------------------------------------------------------------- 长期历史
+
+
+def save_analyst_history_data(stock_code, day, analyst_count):
+    """把某只股票当日的分析师关注数量写入长期存储（永不过期）。"""
+    try:
         from ..core.cache_with_database import store_long_term_data
 
-        result = store_long_term_data(key, data, "analyst", None)
-        if result:
-            logger.info(f"分析师历史数据已保存: {key} (关注数量: {analyst_count})")
+        key = f"analyst_history:{stock_code}:{day}"
+        data = {"stock_code": stock_code, "date": day, "analyst_count": analyst_count}
+        ok = store_long_term_data(key, data, "analyst", None)
+        if ok:
+            logger.debug(f"历史关注数已保存: {key} = {analyst_count}")
         else:
-            logger.warning(f"保存分析师历史数据失败: {key}")
-        return result
-    except Exception as e:
+            logger.warning(f"历史关注数保存失败: {key}")
+        return ok
+    except Exception as e:  # noqa: BLE001
         logger.error(f"保存分析师历史数据失败: {e}")
         return False
 
 
-def _fetch_analyst_stocks(
-    analyst_id, analyst_name, indicator="最新跟踪成分股", add_delay=True
-):
-    """辅助函数：获取单个分析师的股票数据，带缓存功能"""
-    try:
-        # 为单个分析师的数据创建缓存键
-        cache_key = f"analyst_stocks_{analyst_id}_{indicator}"
-
-        # 首先尝试从缓存获取数据
-        cached_data = get_analyst_cached_data(cache_key)
-        if cached_data is not None:
-            logger.info(f"从缓存获取分析师 {analyst_name}({analyst_id}) 的跟踪股票数据")
-            return cached_data, analyst_name, indicator
-
-        # 如果缓存中没有数据，则从API获取
-        from akshare import stock_analyst_detail_em
-
-        if add_delay:
-            time.sleep(0.1)  # 避免请求过快
-        analyst_detail_df = stock_analyst_detail_em(
-            analyst_id=analyst_id, indicator=indicator
-        )
-        analyst_stocks = analyst_detail_df.to_dict("records")
-
-        # 将获取到的数据存入缓存
-        set_analyst_cache_data(cache_key, analyst_stocks)
-
-        logger.info(
-            f"!akshare!分析师 {analyst_name}({analyst_id}) 获取到 {len(analyst_stocks)} 只 {indicator} 股票"
-        )
-        return analyst_stocks, analyst_name, indicator
-    except Exception as e:
-        logger.warning(
-            f"获取分析师 {analyst_name}({analyst_id}) 的跟踪股票数据时出错: {str(e)}"
-        )
-        return [], analyst_name, indicator
+# ---------------------------------------------------------------- 数据获取
 
 
-def get_analyst_rank_data(period="2026"):
+def get_analyst_rank_data():
+    """获取**年度**分析师排行榜（全市场前 100，保持接口原始顺序）。
+
+    收益率字段名带年份（如 ``2026年收益率``），故动态取，不再写死年份。
     """
-    获取分析师排行榜数据
-    :param period: 时间周期，固定返回2025年数据，参数没用
-    :return: 分析师排行榜数据
-    """
-    year = datetime.today().year
+    year = _year()
     cache_key = f"analyst_rank_{year}"
-    cached_data = get_analyst_cached_data(cache_key)
-    if cached_data is not None:
-        logger.info(f"从缓存返回分析师 2025 年数据")
-        return cached_data
+    cached = get_analyst_cached_data(cache_key)
+    if cached is not None:
+        logger.info(f"从缓存返回 {year} 年度分析师排行")
+        return cached
 
     try:
-        logger.info(f"开始获取分析师 2025 年排行榜数据")
-        # 使用akshare获取分析师排行榜数据
-        df = ak.stock_analyst_rank_em(year=year)
-        analyst_rank_data = df.to_dict("records")
-        set_analyst_cache_data(cache_key, analyst_rank_data, cache_duration=24 * 3600)
-        logger.info(f"!akshare!获取到 {len(analyst_rank_data)} 条分析师排行榜数据")
-        return analyst_rank_data
-    except Exception as e:
-        logger.error(f"获取分析师 2025 年排行榜数据时出错: {str(e)}")
+        logger.info(f"获取 {year} 年度分析师排行榜…")
+        df = ak.stock_analyst_rank_em(year=str(year))
+        records = df.to_dict("records")
+        set_analyst_cache_data(cache_key, records, cache_duration=24 * 3600)
+        logger.info(f"!akshare!获取到 {len(records)} 条分析师排行数据")
+        return records
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"获取 {year} 年度分析师排行失败: {e}")
         return []
 
 
-def _get_combined_analyst_data(top_analysts=50, top_stocks=50, period="3个月"):
-    """
-    组合函数：一次性获取分析师重点关注股票和最新跟踪成份股数据，避免重复获取排行榜数据
-    :param top_analysts: 前N名分析师，默认20
-    :param top_stocks: 返回前N只重点关注股票，默认50
-    :param period: 时间周期，默认"3个月"
-    :return: 包含重点关注股票和最新跟踪数据的字典
-    """
+def _fetch_analyst_stocks(analyst_id, analyst_name, indicator=DEFAULT_INDICATOR):
+    """获取单个分析师的跟踪成份股（带缓存）。
 
-    combined_cache_key = f"combined_analyst_data_{period}_{top_analysts}_{top_stocks}"
-    # 检查组合缓存
-    cached_data = get_analyst_cached_data(combined_cache_key)
-    if cached_data is not None:
-        logger.info(f"从缓存返回组合分析师数据")
-        return cached_data
+    注：`成分股个数=0` 的分析师调该接口会抛 `TypeError`（akshare 内部对 None 取下标），
+    调用方应先按 `成分股个数` 过滤；此处仍保留兜底。
+    """
+    cache_key = f"analyst_stocks_{analyst_id}_{indicator}"
+    cached = get_analyst_cached_data(cache_key)
+    if cached is not None:
+        logger.debug(f"从缓存获取 {analyst_name}({analyst_id}) 的 {indicator}")
+        return cached
 
     try:
-        logger.info(
-            f"开始获取组合分析师数据（前{top_analysts}名分析师，前{top_stocks}只股票）"
-        )
-        analyst_rank_data = get_analyst_rank_data("2026")
-        if not analyst_rank_data:
-            logger.warning("未能获取分析师排行榜数据")
+        from akshare import stock_analyst_detail_em
+
+        time.sleep(0.1)  # 轻微限速，避免请求过密
+        df = stock_analyst_detail_em(analyst_id=str(analyst_id), indicator=indicator)
+        stocks = df.to_dict("records")
+        set_analyst_cache_data(cache_key, stocks)
+        logger.info(f"!akshare!{analyst_name}({analyst_id}) 获取到 {len(stocks)} 只{indicator}")
+        return stocks
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"获取 {analyst_name}({analyst_id}) 的{indicator}失败: {e}")
+        return []
+
+
+def _get_combined_analyst_data(top_analysts=50, top_stocks=50):
+    """前 N 名分析师的「最新跟踪成份股」聚合 → 重点关注股票（按被关注数排序）。"""
+    cache_key = f"combined_analyst_data_{top_analysts}_{top_stocks}"
+    cached = get_analyst_cached_data(cache_key)
+    if cached is not None:
+        logger.info("从缓存返回组合分析师数据")
+        return cached
+
+    try:
+        rank_data = get_analyst_rank_data()
+        if not rank_data:
+            logger.warning("未能获取分析师排行数据")
             return {"top_focus_stocks": [], "latest_tracking": []}
 
-        # 按指定周期的收益率排序
-        if period == "2025年":
-            analyst_rank_data.sort(
-                key=lambda x: float(x.get("2025年收益率", 0) or 0), reverse=True
-            )
-        elif period == "3个月":
-            analyst_rank_data.sort(
-                key=lambda x: float(x.get("3个月收益率", 0) or 0), reverse=True
-            )
-        elif period == "6个月":
-            analyst_rank_data.sort(
-                key=lambda x: float(x.get("6个月收益率", 0) or 0), reverse=True
-            )
-        elif period == "12个月":
-            analyst_rank_data.sort(
-                key=lambda x: float(x.get("12个月收益率", 0) or 0), reverse=True
-            )
-        else:
-            analyst_rank_data.sort(
-                key=lambda x: float(x.get("3个月收益率", 0) or 0), reverse=True
-            )
+        top_analysts_data = rank_data[:top_analysts]
+        logger.info(f"取前 {len(top_analysts_data)} 名分析师（共 {len(rank_data)} 名）")
 
-        total_analysts = len(analyst_rank_data)
-        top_analysts_data = analyst_rank_data[:top_analysts]
-        logger.info(
-            f"获取到前{top_analysts}名分析师数据，共{total_analysts}名分析师可用"
-        )
-
-        # 统计所有分析师的最新跟踪成份股，统计出现次数
         stock_counter = {}
         all_latest_tracking = []
+        processed = 0
 
-        # 串行处理每个分析师的数据
-        processed_analyst_count = 0  # 统计实际处理的分析师数量
         for idx, analyst in enumerate(top_analysts_data, 1):
-            indicator = "最新跟踪成分股"
-            analyst_name = analyst.get("分析师名称", "")
+            name = analyst.get("分析师名称", "")
             analyst_id = analyst.get("分析师ID", "")
-            # 串行获取单个分析师的股票数据
-            analyst_stocks, _, _ = _fetch_analyst_stocks(
-                analyst_id, analyst_name, indicator
-            )
-            logger.info(
-                f"分析师 {analyst_name}({analyst_id}) 获取到 {len(analyst_stocks)} 只跟踪股票"
-            )
-            for stock in analyst_stocks:
-                stock_code = stock.get("股票代码", "")
-                stock_name = stock.get("股票名称", "")
-                if stock_code and stock_name:
-                    # 标准化股票代码和名称，确保准确统计
-                    stock_code = stock_code.strip().upper()  # 标准化股票代码
-                    stock_name = stock_name.strip()  # 标准化股票名称
+            tracked = int(analyst.get("成分股个数") or 0)
+            if not analyst_id or tracked <= 0:
+                logger.debug(f"跳过 {name}({analyst_id})：无跟踪成份股")
+                continue
 
-                    # 统计股票出现次数（被多少个分析师关注）- 用于重点关注股票
-                    if stock_code in stock_counter:
-                        stock_counter[stock_code]["analyst_count"] += 1
-                        # 收集价格信息
-                        trade_price_str = stock.get("成交价格(前复权)", "")
-                        latest_price_str = stock.get("最新价格", "")
+            stocks = _fetch_analyst_stocks(analyst_id, name, DEFAULT_INDICATOR)
+            processed += 1
 
-                        if (
-                            trade_price_str
-                            and trade_price_str != ""
-                            and trade_price_str != "--"
-                        ):
-                            try:
-                                trade_price = float(trade_price_str)
-                                stock_counter[stock_code]["trade_prices"].append(
-                                    trade_price
-                                )
-                            except ValueError:
-                                pass  # 如果无法转换为数字则跳过
+            for stock in stocks:
+                code = str(stock.get("股票代码", "")).strip().upper()
+                stock_name = str(stock.get("股票名称", "")).strip()
+                if not (code and stock_name):
+                    continue
 
-                        if (
-                            latest_price_str
-                            and latest_price_str != ""
-                            and latest_price_str != "--"
-                            and not stock_counter[stock_code]["latest_price"]
-                        ):
-                            try:
-                                stock_counter[stock_code]["latest_price"] = float(
-                                    latest_price_str
-                                )
-                            except ValueError:
-                                # 如果无法转换为数字，则设置为None，避免前端出现类型错误
-                                stock_counter[stock_code]["latest_price"] = None
+                info = stock_counter.get(code)
+                if info is None:
+                    info = {
+                        "stock_code": code,
+                        "stock_name": stock_name,
+                        "analyst_count": 0,
+                        "trade_prices": [],
+                        "latest_price": None,
+                    }
+                    stock_counter[code] = info
+                info["analyst_count"] += 1
 
-                    else:
-                        # 初始化股票统计信息
-                        stock_info_dict = {
-                            "analyst_count": 1,
-                            "stock_name": stock_name,
-                            "stock_code": stock_code,
-                            "first_seen": stock,
-                            "trade_prices": [],
-                            "latest_price": "",
-                            "avg_price": 0,
-                            "max_price": 0,
-                            "min_price": 0,
-                        }
+                trade = _to_float(stock.get("成交价格(前复权)"))
+                if trade is not None:
+                    info["trade_prices"].append(trade)
+                if info["latest_price"] is None:
+                    info["latest_price"] = _to_float(stock.get("最新价格"))
 
-                        # 收集价格信息
-                        trade_price_str = stock.get("成交价格(前复权)", "")
-                        latest_price_str = stock.get("最新价格", "")
-
-                        if (
-                            trade_price_str
-                            and trade_price_str != ""
-                            and trade_price_str != "--"
-                        ):
-                            try:
-                                trade_price = float(trade_price_str)
-                                stock_info_dict["trade_prices"].append(trade_price)
-                            except ValueError:
-                                pass  # 如果无法转换为数字则跳过
-
-                        if (
-                            latest_price_str
-                            and latest_price_str != ""
-                            and latest_price_str != "--"
-                        ):
-                            try:
-                                stock_info_dict["latest_price"] = float(
-                                    latest_price_str
-                                )
-                            except ValueError:
-                                # 如果无法转换为数字，则设置为None，避免前端出现类型错误
-                                stock_info_dict["latest_price"] = None
-
-                        stock_counter[stock_code] = stock_info_dict
-
-                    # 为最新跟踪数据添加额外字段
-                    stock_info_latest = stock.copy()
-                    stock_info_latest["analyst_name"] = analyst_name
-                    stock_info_latest["analyst_rank"] = idx
-                    stock_info_latest["analyst_industry"] = (
-                        analyst.get("行业") or "未知"
-                    )
-                    stock_info_latest["analyst_stocks_num"] = (
-                        analyst.get("成分股个数") or 0
-                    )
-                    stock_info_latest["analyst_total_return"] = (
-                        analyst.get("2025年收益率") or ""
-                    )
-
-                    if period == "3个月":
-                        stock_info_latest["analyst_period_return"] = (
-                            analyst.get("3个月收益率") or ""
-                        )
-                    elif period == "6个月":
-                        stock_info_latest["analyst_period_return"] = (
-                            analyst.get("6个月收益率") or ""
-                        )
-                    elif period == "12个月":
-                        stock_info_latest["analyst_period_return"] = (
-                            analyst.get("12个月收益率") or ""
-                        )
-                    all_latest_tracking.append(stock_info_latest)
-            processed_analyst_count += 1
-
-        latest_unique_stocks = len(stock_counter)
-        latest_focus_stocks = len(
-            [s for s in stock_counter.values() if s["analyst_count"] > 1]
-        )
-        logger.info(f"实际处理了 {processed_analyst_count} 个分析师的数据")
-        logger.info(
-            f"统计到 {latest_unique_stocks} 只唯一股票，其中被多个分析师关注的股票有 {latest_focus_stocks} 只"
-        )
-        logger.info(f"获取到最新跟踪共{len(all_latest_tracking)}条记录")
-
-        # 计算每只股票的统计信息并按分析师关注数量排序
-        for stock_code, stock_info in stock_counter.items():
-            if stock_info["trade_prices"]:
-                avg_trade_price = sum(stock_info["trade_prices"]) / len(
-                    stock_info["trade_prices"]
+                all_latest_tracking.append(
+                    {**stock, "analyst_name": name, "analyst_rank": idx}
                 )
-                max_trade_price = max(stock_info["trade_prices"])
-                min_trade_price = min(stock_info["trade_prices"])
+
+        # 价格统计
+        for info in stock_counter.values():
+            prices = info.pop("trade_prices")
+            if prices:
+                info["avg_price"] = round(sum(prices) / len(prices), 2)
+                info["max_price"] = max(prices)
+                info["min_price"] = min(prices)
             else:
-                avg_trade_price = 0
-                max_trade_price = 0
-                min_trade_price = 0
+                info["avg_price"] = info["max_price"] = info["min_price"] = 0
 
-            # 更新股票信息，包含价格统计
-            stock_info["avg_price"] = (
-                round(avg_trade_price, 2) if avg_trade_price != 0 else 0
-            )
-            stock_info["max_price"] = max_trade_price
-            stock_info["min_price"] = min_trade_price
-            stock_info["latest_price"] = stock_info["latest_price"]
+        focus = sorted(stock_counter.values(),
+                       key=lambda x: x["analyst_count"], reverse=True)[:top_stocks]
+        unique = len(stock_counter)
+        multi = sum(1 for s in stock_counter.values() if s["analyst_count"] > 1)
+        logger.info(f"处理 {processed} 位分析师 → {unique} 只唯一股票（其中 {multi} 只被多人关注）")
 
-        # 按分析师关注数量排序，取前top_stocks只股票
-        sorted_stocks = sorted(
-            stock_counter.values(), key=lambda x: x["analyst_count"], reverse=True
-        )
-        top_focus_stocks = sorted_stocks[:top_stocks]
-        logger.info(f"获取到分析师重点关注股票 {len(top_focus_stocks)} 只")
-
-        # 保存历史数据 - 只在默认参数时保存（3个月、50只股票、20名分析师）
-        from datetime import date
-
-        today = date.today().strftime("%Y-%m-%d")
-        # 只在默认参数组合时保存历史数据
-        if top_analysts == 50 and top_stocks == 50 and period == "3个月":
-            for stock_info in top_focus_stocks:
-                stock_code = stock_info["stock_code"]
-                analyst_count = stock_info["analyst_count"]
-                save_analyst_history_data(stock_code, today, analyst_count)
-            logger.info("历史分析师数据保存完成（默认参数组合）")
+        # 历史关注数：仅默认参数下记录（避免多组参数写重复点）
+        if top_analysts == 50 and top_stocks == 50:
+            today = date.today().strftime("%Y-%m-%d")
+            for s in focus:
+                save_analyst_history_data(s["stock_code"], today, s["analyst_count"])
 
         result = {
-            "top_focus_stocks": top_focus_stocks,
+            "top_focus_stocks": focus,
             "latest_tracking": all_latest_tracking,
-            "total_analysts_processed": processed_analyst_count,
-            "latest_focus_stocks": latest_focus_stocks,
-            "latest_unique_stocks": latest_unique_stocks,
+            "total_analysts_processed": processed,
+            "latest_focus_stocks": multi,
+            "latest_unique_stocks": unique,
         }
-
-        # 设置组合缓存，缓存时间适当延长
-        set_analyst_cache_data(combined_cache_key, result)
-        logger.info(
-            f"组合分析师数据获取完成，共{len(top_focus_stocks)}只重点股票，{len(all_latest_tracking)}条最新跟踪记录"
-        )
+        set_analyst_cache_data(cache_key, result)
+        logger.info(f"组合数据完成：{len(focus)} 只重点股票，{len(all_latest_tracking)} 条最新跟踪")
         return result
 
-    except Exception as e:
-        logger.error(f"获取组合分析师数据时出错: {str(e)}")
-        import traceback
-
-        traceback.print_exc()
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"获取组合分析师数据失败: {e}", exc_info=True)
         return {"top_focus_stocks": [], "latest_tracking": []}
 
 
-def get_analyst_focus_stocks(top_analysts=50, top_stocks=50, period="3个月"):
-    """
-    获取分析师重点关注股票（前50个），通过获取前20名分析师的最新跟踪成份股后统计得出
-    :param top_analysts: 前N名分析师，默认20
-    :param top_stocks: 返回前N只重点关注股票，默认50
-    :param period: 时间周期，默认"3个月"
-    :return: 分析师重点关注股票列表
-    """
-    cache_key = f"analyst_focus_stocks_{period}_{top_analysts}"
-    cached_data = get_analyst_cached_data(cache_key)
-    if cached_data is not None:
-        logger.info(f"从缓存返回分析师重点关注股票数据")
-        return cached_data
+def _to_float(value):
+    """把 akshare 的价格/涨跌值转 float；空值/占位符/非数字 → None。"""
+    if value is None or value == "" or value == "--":
+        return None
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    return None if f != f else f  # NaN → None
 
-    # 使用组合函数获取数据，然后只返回关注股票部分
-    combined_data = _get_combined_analyst_data(top_analysts, top_stocks, period)
+
+# ---------------------------------------------------------------- 对外接口
+
+
+def get_analyst_focus_stocks(top_analysts=50, top_stocks=50):
+    """分析师重点关注股票（按被多少位分析师跟踪排序）。"""
+    cache_key = f"analyst_focus_stocks_{top_analysts}_{top_stocks}"
+    cached = get_analyst_cached_data(cache_key)
+    if cached is not None:
+        logger.info("从缓存返回分析师重点关注股票")
+        return cached
+
+    combined = _get_combined_analyst_data(top_analysts, top_stocks)
     result = {
-        "top_focus_stocks": combined_data.get("top_focus_stocks", []),
-        "total_analysts_processed": combined_data.get("total_analysts_processed", 0),
-        "latest_unique_stocks": combined_data.get("latest_unique_stocks", 0),
-        "latest_focus_stocks": combined_data.get("latest_focus_stocks", 0),
+        "top_focus_stocks": combined.get("top_focus_stocks", []),
+        "total_analysts_processed": combined.get("total_analysts_processed", 0),
+        "latest_unique_stocks": combined.get("latest_unique_stocks", 0),
+        "latest_focus_stocks": combined.get("latest_focus_stocks", 0),
     }
-
     set_analyst_cache_data(cache_key, result)
-    logger.info(
-        f"分析师重点关注股票数据获取完成，共{len(result['top_focus_stocks'])}只重点股票"
-    )
     return result
 
 
-def get_analyst_latest_tracking(top_analysts=50, top_stocks=50, period="3个月"):
+def get_analyst_latest_tracking(top_analysts=50, top_stocks=50):
+    """最新跟踪成份股明细（前 N 名分析师的原始记录）。"""
+    cache_key = f"latest_analyst_tracking_{top_analysts}_{top_stocks}"
+    cached = get_analyst_cached_data(cache_key)
+    if cached is not None:
+        logger.info("从缓存返回最新跟踪成份股")
+        return cached
+
+    combined = _get_combined_analyst_data(top_analysts, top_stocks)
+    latest = combined.get("latest_tracking", [])
+    set_analyst_cache_data(cache_key, latest)
+    logger.info(f"最新跟踪成份股：{len(latest)} 条")
+    return latest
+
+
+def get_analyst_updated_stocks(days=30, indicator=DEFAULT_INDICATOR):
+    """最近 N 天内「有更新」的跟踪成份股。
+
+    「更新」的判定字段按跟踪类型取（见 `_UPDATED_DATE_FIELDS`）：
+    最新跟踪看「最新评级日期」，历史跟踪看「调出日期」，缺失时退回「调入日期」。
     """
-    获取最新跟踪成份股（前20名分析师），获取前20名分析师的最新跟踪成份股数据
-    :param top_analysts: 前N名分析师，默认20
-    :param top_stocks: 前N只股票，默认50
-    :param period: 时间周期，默认"3个月"
-    :return: 最新跟踪成份股数据
-    """
-    cache_key = f"latest_analyst_tracking_{period}_{top_analysts}_{top_stocks}"
-    cached_data = get_analyst_cached_data(cache_key)
-    if cached_data is not None:
-        logger.info(f"从缓存返回最新跟踪成份股数据")
-        return cached_data
+    if indicator not in _UPDATED_DATE_FIELDS:
+        raise ValueError(f"未知跟踪类型：{indicator}（可选：{list(_UPDATED_DATE_FIELDS)}）")
 
-    # 使用组合函数获取数据，然后只返回最新跟踪部分
-    combined_data = _get_combined_analyst_data(
-        top_analysts, top_stocks, period
-    )  # 使用传入的top_stocks参数
-    latest_tracking = combined_data.get("latest_tracking", [])
-
-    set_analyst_cache_data(cache_key, latest_tracking)
-    logger.info(f"最新跟踪成份股数据获取完成，共{len(latest_tracking)}条记录")
-    return latest_tracking
-
-
-def get_analyst_combined_data(top_analysts=50, top_stocks=50, period="3个月"):
-    """
-    为报告生成获取完整的分析师数据（包含重点关注股票和最新跟踪数据）
-    :param top_analysts: 前N名分析师，默认20
-    :param top_stocks: 返回前N只重点关注股票，默认50
-    :param period: 时间周期，默认"3个月"
-    :return: 包含重点关注股票和最新跟踪数据的字典
-    """
-    # 使用内部组合函数获取完整数据
-    combined_data = _get_combined_analyst_data(top_analysts, top_stocks, period)
-    return combined_data
-
-
-def get_analyst_updated_stocks(days=30, indicator="最新跟踪成分股"):
-    """
-    获取最近更新的股票列表
-    :param days: 天数阈值，只返回此天数内更新的股票
-    :return: 最近更新的股票列表
-    """
-    from datetime import datetime, timedelta
-
-    date_threshold = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-
+    threshold = (datetime.now() - timedelta(days=days)).date()
     cache_key = f"recently_updated_stocks_{days}_{indicator}"
-    cached_data = get_analyst_cached_data(cache_key)
-    if cached_data is not None:
-        logger.info(
-            f"从缓存返回最近更新的股票数据，天数阈值: {days}天, 指标: {indicator}"
-        )
-        return cached_data
+    cached = get_analyst_cached_data(cache_key)
+    if cached is not None:
+        logger.info(f"从缓存返回最近更新股票（{days} 天 / {indicator}）")
+        return cached
 
     try:
-        logger.info(
-            f"开始获取最近更新的股票数据，天数阈值: {days}天, 指标: {indicator}"
-        )
-        # 获取分析师排行榜数据
-        analyst_rank_data = get_analyst_rank_data(period="2026")
+        logger.info(f"获取最近更新股票：{days} 天 / {indicator}")
+        rank_data = get_analyst_rank_data()
+        date_fields = _UPDATED_DATE_FIELDS[indicator]
 
-        # 筛选在指定日期之后更新的分析师
-        filtered_analysts = []
-        for analyst in analyst_rank_data:
-            update_date_str = analyst.get("更新日期", "")
-            if update_date_str:
-                try:
-                    # 将字符串日期转换为datetime对象进行比较
-                    if isinstance(update_date_str, str):
-                        # 解析日期字符串
-                        try:
-                            update_date = datetime.strptime(
-                                update_date_str, "%Y-%m-%d"
-                            ).date()
-                        except ValueError:
-                            # 如果格式不是YYYY-MM-DD，尝试其他可能的格式
-                            try:
-                                update_date = datetime.strptime(
-                                    update_date_str, "%Y-%m-%d %H:%M:%S"
-                                ).date()
-                            except ValueError:
-                                logger.warning(f"无法解析日期格式: {update_date_str}")
-                                continue
-                    else:
-                        update_date = update_date_str  # 如果已经是date/datetime对象
-
-                    threshold_date = datetime.strptime(
-                        date_threshold, "%Y-%m-%d"
-                    ).date()
-
-                    # 比较日期，只保留指定日期之后的记录
-                    if update_date >= threshold_date:
-                        filtered_analysts.append(analyst)
-                except Exception as e:
-                    logger.warning(
-                        f"日期比较出错: {str(e)}，分析师: {analyst.get('分析师名称', '')}，更新日期: {update_date_str}"
-                    )
-
-        logger.info(
-            f"筛选出 {len(filtered_analysts)} 位在 {date_threshold} 之后更新的分析师, indicator: {indicator}"
-        )
-
-        # 获取这些分析师的所有股票
-        all_recent_stocks = []
-        for analyst in filtered_analysts:
-            analyst_name = analyst.get("分析师名称", "")
+        recent = []
+        for analyst in rank_data:
+            updated = _parse_date(analyst.get("更新日期"))
+            if updated is None or updated < threshold:
+                continue
+            name = analyst.get("分析师名称", "")
             analyst_id = analyst.get("分析师ID", "")
-            if analyst_id:
-                try:
-                    # 获取该分析师的所有股票数据
-                    # indicator="最新跟踪成分股"
-                    analyst_stocks, _, _ = _fetch_analyst_stocks(
-                        analyst_id, analyst_name, indicator
-                    )
-                    for stock in analyst_stocks:
-                        # 检查股票的调入日期是否也满足条件
-                        entry_date_str = stock.get("最新评级日期", "")
-                        if entry_date_str:
-                            try:
-                                # 将字符串日期转换为datetime对象进行比较
-                                if isinstance(entry_date_str, str):
-                                    # 解析日期字符串
-                                    try:
-                                        entry_date = datetime.strptime(
-                                            entry_date_str, "%Y-%m-%d"
-                                        ).date()
-                                    except ValueError:
-                                        # 如果格式不是YYYY-MM-DD，尝试其他可能的格式
-                                        try:
-                                            entry_date = datetime.strptime(
-                                                entry_date_str, "%Y-%m-%d %H:%M:%S"
-                                            ).date()
-                                        except ValueError:
-                                            logger.warning(
-                                                f"无法解析日期格式: {entry_date_str}"
-                                            )
-                                            continue
-                                else:
-                                    entry_date = (
-                                        entry_date_str  # 如果已经是date/datetime对象
-                                    )
+            if not analyst_id or int(analyst.get("成分股个数") or 0) <= 0:
+                continue
 
-                                threshold_date = datetime.strptime(
-                                    date_threshold, "%Y-%m-%d"
-                                ).date()
-
-                                # 比较日期，只保留指定日期之后的记录
-                                if entry_date >= threshold_date:
-                                    stock["analyst_name"] = analyst_name
-                                    stock["analyst_period_3m_return"] = analyst.get(
-                                        "3个月收益率", ""
-                                    )
-                                    stock["analyst_period_6m_return"] = analyst.get(
-                                        "6个月收益率", ""
-                                    )
-                                    stock["analyst_period_12m_return"] = analyst.get(
-                                        "12个月收益率", ""
-                                    )
-                                    stock["analyst_industry"] = analyst.get(
-                                        "行业", "Unknown"
-                                    )
-                                    all_recent_stocks.append(stock)
-                            except Exception as e:
-                                logger.warning(
-                                    f"股票日期比较出错: {str(e)}，股票: {stock.get('股票名称', '')}，评级日期: {entry_date_str}"
-                                )
-                except Exception as e:
-                    logger.warning(
-                        f"获取分析师 {analyst_name}({analyst_id}) {indicator}  的股票数据时出错: {str(e)}"
-                    )
+            for stock in _fetch_analyst_stocks(analyst_id, name, indicator):
+                day = next((_parse_date(stock.get(f)) for f in date_fields
+                            if _parse_date(stock.get(f))), None)
+                if day is None or day < threshold:
                     continue
+                stock = dict(stock)
+                stock["analyst_name"] = name
+                stock["analyst_period_3m_return"] = analyst.get("3个月收益率", "")
+                stock["analyst_period_6m_return"] = analyst.get("6个月收益率", "")
+                stock["analyst_period_12m_return"] = analyst.get("12个月收益率", "")
+                recent.append(stock)
 
-        logger.info(
-            f"获取到 {len(all_recent_stocks)} 只符合条件 {indicator}  的最近更新股票"
-        )
-
-        # 设置缓存
-        set_analyst_cache_data(cache_key, all_recent_stocks)
-        return all_recent_stocks
-
-    except Exception as e:
-        logger.error(f"获取最近更新的股票数据时出错: {str(e)}")
-        import traceback
-
-        traceback.print_exc()
+        logger.info(f"最近 {days} 天内更新的{indicator}：{len(recent)} 条")
+        set_analyst_cache_data(cache_key, recent)
+        return recent
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"获取最近更新股票失败: {e}", exc_info=True)
         return []
 
 
-def get_analyst_history_tracking(stock_code, days=360):
-    """从长期存储中获取股票历史分析师跟踪数据"""
-    try:
-        import json
-        from datetime import datetime, timedelta
+def _parse_date(value):
+    """把 akshare 的日期（date / datetime / 'YYYY-MM-DD' / 'YYYY-MM-DD HH:MM:SS'）转成 date。"""
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    text = str(value).strip()
+    for fmt in ("%Y-%m-%d", "%Y-%m-%d %H:%M:%S", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            continue
+    return None
 
+
+def get_analyst_history_tracking(stock_code, days=360):
+    """某只股票的「分析师关注数量」历史序列（来自长期存储）。"""
+    try:
         from ..core.cache_with_database import get_module_long_term_data
 
-        # 计算日期范围
-        end_date = datetime.now().date()
-        start_date = end_date - timedelta(days=days)
+        end = datetime.now().date()
+        start = end - timedelta(days=days)
 
-        # 获取该股票的所有历史数据
-        all_data = get_module_long_term_data("analyst")
+        rows = []
+        for item in get_module_long_term_data("analyst"):
+            data = item.get("data") or {}
+            day = _parse_date(data.get("date"))
+            if data.get("stock_code") == stock_code and day and start <= day <= end:
+                rows.append(data)
 
-        # 筛选指定股票和日期范围的数据
-        filtered_data = []
-        for item in all_data:
-            data = item["data"]
-            if (
-                data.get("stock_code") == stock_code
-                and data.get("date")
-                and start_date
-                <= datetime.strptime(data["date"], "%Y-%m-%d").date()
-                <= end_date
-            ):
-                filtered_data.append(data)
-
-        # 按日期排序
-        filtered_data.sort(key=lambda x: x["date"])
-
-        # 提取日期和数量
-        dates = [item["date"] for item in filtered_data]
-        counts = [item["analyst_count"] for item in filtered_data]
-
-        logger.info(f"获取到 {len(dates)} 条 {stock_code} 的历史分析师跟踪数据")
-        return {"dates": dates, "analyst_counts": counts}
-    except Exception as e:
-        logger.error(f"获取股票 {stock_code} 历史数据失败: {e}")
+        rows.sort(key=lambda x: x["date"])
+        logger.info(f"获取到 {len(rows)} 条 {stock_code} 的历史关注数")
+        return {"dates": [r["date"] for r in rows],
+                "analyst_counts": [r["analyst_count"] for r in rows]}
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"获取股票 {stock_code} 历史关注数失败: {e}")
         return None
-
-
-if __name__ == "__main__":
-    print("测试分析师数据获取功能...")
-    print("\n1. 测试获取分析师排行榜数据:")
-    try:
-        # rank_data = get_analyst_rank_data("3个月")
-        # print(f"获取到 {len(rank_data)} 条分析师排行榜数据")
-        # if rank_data:
-        #     print(f"示例数据: {rank_data[0] if len(rank_data) > 0 else '无数据'}")
-
-        # print(f"获取到 {len(combined_data.get('top_focus_stocks', []))} 只重点关注股票")
-        # print(f"获取到 {len(combined_data.get('latest_tracking', []))} 条最新跟踪记录")
-
-        # print(f"top_focus_stocks: combined_data.get('top_focus_stocks', [])")
-        # #print(f"latest_tracking: combined_data.get('latest_tracking', [])")
-
-        # if combined_data.get('top_focus_stocks'):
-        #     print(f"示例数据: {combined_data['top_focus_stocks'][0] if len(combined_data['top_focus_stocks']) > 0 else '无数据'}")
-
-        # print("\n3. 测试获取分析师重点关注股票:")
-        # focus_stocks = get_analyst_focus_stocks(20, 7, "3个月")  # 减少数量以便快速测试
-        # print(f"获取到 {len(focus_stocks.get('top_focus_stocks', []))} 只重点关注股票")
-
-        # for stock in focus_stocks.get('top_focus_stocks', []):
-        #     print(stock)
-
-        # if focus_stocks.get('top_focus_stocks'):
-        #     print(f"示例数据: {focus_stocks['top_focus_stocks'][0] if len(focus_stocks['top_focus_stocks']) > 0 else '无数据'}")
-
-        # print("\n4. 测试获取最新跟踪成份股:")
-        # latest_tracking = get_latest_analyst_tracking(5, "3个月")  # 减少数量以便快速测试
-        # print(f"获取到 {len(latest_tracking)} 条最新跟踪记录")
-        # if latest_tracking:
-        #     print(f"示例数据: {latest_tracking[0] if len(latest_tracking) > 0 else '无数据'}")
-        # all_recent_stocks = get_analyst_updated_stocks(days=30, indicator="历史跟踪成分股")
-        # print(f"获取到: {all_recent_stocks}")
-        # print("\n5. 测试获取股票同行比较数据:")
-        # stock_symbol = "SZ000408"
-        # #stock_symbol = "SZ000895"
-        # df = ak.stock_zh_growth_comparison_em(symbol=stock_symbol)
-        # result = df.to_dict('records')
-        # print(f"result: {result}")
-
-        result = get_analyst_combined_data(20, 50, "3个月")
-        print(f"result: {result}")
-
-        # peer_comparison = get_stock_growth_comparison(stock_symbol)
-        # print(f"获取到股票 {stock_symbol} 的同行比较数据: {peer_comparison}")
-
-    except Exception as e:
-        logger.error(f"测试分析师数据时出错: {str(e)}")
-        print(f"测试分析师数据时出错: {str(e)}")

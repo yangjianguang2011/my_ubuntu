@@ -1,24 +1,45 @@
-[mount_point]
-/data = /data
+; ============================================================================
+; 统一配置模板 —— 复制为 config.ini 后按需修改
+;
+; 路径约定
+;   这里写的是「容器内视角」的绝对路径：
+;     * 容器 / Linux 生产：原样使用（/data 是数据卷挂载点）
+;     * Windows 本机开发：按 [mount_point] 映射到项目内
+;         /data → <项目根>/run、/var/log → <项目根>/logs、/root/apps → <项目根>
+;   非路径型配置（数字/布尔/URL/枚举）不受影响。
+; ============================================================================
 
 [paths]
 root_dir = /root/apps
 data_dir = /data
-log_dir = /var/log
+; 脚本类日志（wrapper/cron）；Python 日志落在各自数据子目录下，不用此项
+log_dir = /data/logs
+
+[mount_point]
+; 容器内路径 = 本机路径（仅 Windows/本机开发时生效）
+;   值以 / 或盘符开头 → 本机绝对路径；否则 → 相对项目根
+; 前缀按「最长优先」匹配
+; 注意：容器里 /root/apps 就是仓库 apps/ 目录的内容（Dockerfile COPY ./apps/xxx → /root/apps/xxx）
+/data              = run
+/var/log           = logs
+/root/apps/stockdb = E:/work/code/stockdb
+/root/apps         = apps
 
 [iptv]
-work_dir = /root/apps/iptv
-iptv_data_dir = /data/iptv_data
+dir = /root/apps/iptv
+data_dir = /data/iptv
 
 [news]
-work_dir = /root/apps/news
-news_data_dir = /data/news_data
+dir = /root/apps/news
+data_dir = /data/news
 
-[crawlers]
-xueqiu_dir = /root/apps/crawlers/xueqiu
-eastmoney_dir = /root/apps/crawlers/eastmoney
-xueqiu_data_dir = /data/xueqiu_data
-analyst_data_dir = /data/analyst_data
+[xueqiu]
+dir = /root/apps/xueqiu
+data_dir = /data/xueqiu_data
+
+[eastmoney]
+dir = /root/apps/eastmoney
+data_dir = /data/analyst_data
 
 [stock_monitor]
 stock_monitor_dir = /root/apps/stock_monitor
@@ -27,9 +48,49 @@ database_dir = /data/stock_monitor_data/database
 settings_file = /data/stock_monitor_data/settings.json
 stocks_file = /data/stock_monitor_data/stocks.json
 
-[web_app]
-web_template_dir = /root/apps/stock_monitor/web_templates
-web_static_dir = /root/apps/stock_monitor/web_static
+; 后台监控：检查间隔（秒）与「开市时段」（仅此时段内检查/发通知）
+; 原为页面上可改，现统一放配置（改动少，改完重启生效）
+check_interval = 180
+market_open_start = 09:30
+market_open_end = 16:00
+
+; 缓存时长（秒）
+stock_cache_timeout = 180
+default_cache_timeout = 86400
+analyst_cache_timeout = 86400
+index_cache_timeout = 86400
+fund_cache_timeout = 86400
+
+[stockdb]
+; stockdb 跑在**宿主机**，容器与 Windows 统一走局域网 IP
+host = stockdb-host
+port = 7899
+; SDK 目录（pybao 内含 stockdb.pyd / zb_core.pyd，非 pip 包，必须存在）
+;   容器内：/root/apps/stockdb（由 docker-compose 挂载宿主机 apps/stockdb）
+;   Windows：/root/apps/stockdb 经 [mount_point] 映射为 E:/work/code/stockdb
+dir = /root/apps/stockdb
+pybao_dir = ${dir}/pybao
+; 在线接口（指数成分 / 全市场证券等）的 API 地址，形如 host:port
+;   留空 = 用服务端数据库里的 mapi_url（服务端未配置时，指数成分接口会报"API IP地址未配置"）
+;   例：api_url = 8.138.149.215:12328
+api_url =
+
+[valuation]
+; 估值方法论参数（与路径无关）
+fetch_start = 20120101
+data_start = 20120101
+fq = qfq
+pool_default = hs300
+; 信号规则：two_state=二态机(买入持有,默认) / cross=进入极端区各记一次(旧)
+signal_mode = two_state
+buy_threshold = 0.10
+sell_threshold = 0.90
+; 个股阈值覆盖（可选）：code:buy/sell，逗号分隔；未列出的用全局默认
+threshold_overrides =
+; 历史位置窗口（交易日）：0=expanding(起于 data_start)；>0=滚动窗口
+pct_window = 0
+; 多因子融合层：默认关闭
+fusion_enabled = false
 
 [messaging]
 ; 消息推送服务配置 - 请修改为您的实际配置
@@ -37,10 +98,5 @@ message_server = https://your-message-server.example.com
 message_username = your_username
 message_token = your_token
 message_channel = wechat
-
-[cache]
-stock_cache_timeout = 180
-industry_cache_timeout = 86400
-analyst_cache_timeout = 86400
-index_cache_timeout = 86400
-fund_cache_timeout = 86400
+; 是否真正发送推送；本机开发可设 false 走「测试模式」（只记日志、不发请求）
+enabled = true
