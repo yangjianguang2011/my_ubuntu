@@ -1,5 +1,4 @@
 ﻿Category	Channels	Playlist
-#iptv	10  http://your-iptv-host:4200/m3u
 burning 10  https://iptv.burningc4.com/TV-IPV4.m3u
 ipv4    10  https://live.zbds.top/tv/iptv4.m3u
 #ftindy  10  https://raw.githubusercontent.com/Ftindy/IPTV-URL/main/IPV6.m3u
