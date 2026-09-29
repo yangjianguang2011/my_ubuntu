@@ -32,9 +32,9 @@ FUSION_WEIGHTS: Dict[str, float] = {
     "pe_ttm_pct": 0.59,
 }
 
-# 买卖阈值（与其它读数一致的 10/90；融合读数 r 低=买）
-PCT_BUY = 0.10
-PCT_SELL = 0.90
+# 注意：本模块**不持有**买卖阈值。融合读数（fusion_pct）作为信号源时，
+# 阈值统一由 `valuation_engine.thresholds_for(code)` 按 config.ini 决定
+# （全局默认 + 个股覆盖），避免出现与配置不一致的第二套魔法值。
 
 
 @dataclass

@@ -14,7 +14,14 @@ import numpy as np
 from datetime import datetime
 from config import setup_logger
 logger = setup_logger(__name__)
-from ..data_fetchers.stock_data_fetcher import get_enhanced_stock_info, _fetch_historical_data, get_stock_info, get_stock_cached_data, set_stock_cache_data
+from ..data_fetchers.stock_data_fetcher import _fetch_historical_data, get_stock_info, get_stock_cached_data, set_stock_cache_data
+from .ma_indicators import (
+    add_ma,
+    is_bearish_arrangement,
+    is_bullish_arrangement,
+    is_near_price,
+    slope_regression,
+)
 
 class TrendTradingAnalyzer:
     """
@@ -128,6 +135,8 @@ class TrendTradingAnalyzer:
                         'signal': signal['signal'],
                         'strength': signal['strength'],
                         'description': signal['description'],
+                        # price 由原始 signal 透传（原先漏掉 → K 线图买卖点标注恒为空）
+                        'price': signal.get('price'),
                         'stop_loss': float(signal['stop_loss']) if signal.get('stop_loss') else None,
                         'target_price': [
                             float(signal['target_price'][0]) if signal['target_price'][0] != float('inf') else None,
@@ -139,6 +148,7 @@ class TrendTradingAnalyzer:
                     } for signal in trading_signals['buy_signals']],
                     'sell_signals': [{
                         'type': 'SELL',
+                        'price': signal.get('price'),
                         'signal': signal['signal'],
                         'strength': signal['strength'],
                         'description': signal['description'],
@@ -165,30 +175,25 @@ class TrendTradingAnalyzer:
 
     def _prepare_data(self, df):
         """
-        数据预处理：计算均线
+        数据预处理：计算均线（走共享指标层 `ma_indicators.add_ma`）
 
         :param df: 原始数据
         :return: 包含均线的 DataFrame
         """
-        df = df.copy()
-        df['ma5'] = df['close'].rolling(window=5).mean()
-        df['ma20'] = df['close'].rolling(window=20).mean()
-        df['ma60'] = df['close'].rolling(window=60).mean()
-        df['ma120'] = df['close'].rolling(window=120).mean()
-        return df
+        return add_ma(df, [5, 20, 60, 120])
 
     # ==================== 趋势分析工具 ====================
 
     def _calculate_trend_slope(self, df, window=20):
         """
-        计算趋势斜率
+        计算趋势斜率（走共享指标层 `ma_indicators.slope_regression`）
 
         使用线性回归计算最近 window 天的价格和各均线斜率
 
         :param df: DataFrame，包含价格和均线数据
         :param window: 计算窗口（默认 20 天）
         :return: dict {
-            'price': 价格斜率 (%/日),
+            'price': 价格斜率 (%/日，对数收益口径),
             'ma5': MA5 斜率,
             'ma20': MA20 斜率,
             'ma60': MA60 斜率
@@ -197,21 +202,18 @@ class TrendTradingAnalyzer:
         slopes = {}
         recent = df.tail(window)
 
-        # 计算价格斜率
+        # 计算价格斜率（log=True：对数收益斜率）
         if 'close' in recent.columns and len(recent) > 1:
-            x = np.arange(len(recent))
-            y = np.log(recent['close'].values)
-            slope, _ = np.polyfit(x, y, 1)
-            slopes['price'] = slope * 100  # 转换为百分比
+            s = slope_regression(recent['close'], window, log=True)
+            if s is not None:
+                slopes['price'] = s
 
-        # 计算均线斜率
+        # 计算均线斜率（log=False：归一化斜率）
         for ma_col in ['ma5', 'ma20', 'ma60']:
             if ma_col in recent.columns and len(recent) > 1:
-                x = np.arange(len(recent))
-                y = recent[ma_col].values
-                slope, _ = np.polyfit(x, y, 1)
-                avg = y.mean()
-                slopes[ma_col] = (slope / avg) * 100 if avg != 0 else 0
+                s = slope_regression(recent[ma_col], window, log=False)
+                if s is not None:
+                    slopes[ma_col] = s
 
         return slopes
 
@@ -556,24 +558,20 @@ class TrendTradingAnalyzer:
             return "三点钟方向（横盘整理）"
 
     # ==================== 辅助判断方法 ====================
+    # 以下三个方法保留为**薄封装**（调用方仍用 self.xxx），实现走共享指标层 `ma_indicators`，
+    # 默认 tolerance=0.05 与原实现一致。
 
     def _is_bullish_arrangement(self, row, tolerance=0.05):
-        """检查是否为多头排列（MA20>MA60>MA120）"""
-        return (
-            row['ma20'] > row['ma60'] > row['ma120'] and
-            row['ma20'] > row['ma120'] * (1 + tolerance)  # MA20 与 MA120 间距至少 tolerance
-        )
+        """检查是否为多头排列（MA20>MA60>MA120，且 MA20 高于 MA120 至少 tolerance）"""
+        return is_bullish_arrangement(row, "ma20", "ma60", "ma120", tolerance)
 
     def _is_bearish_arrangement(self, row, tolerance=0.05):
-        """检查是否为空头排列（MA20<MA60<MA120）"""
-        return (
-            row['ma20'] < row['ma60'] < row['ma120'] and
-            row['ma20'] < row['ma120'] * (1 - tolerance)  # MA20 与 MA120 间距至少 tolerance
-        )
+        """检查是否为空头排列（MA20<MA60<MA120，且 MA20 低于 MA120 至少 tolerance）"""
+        return is_bearish_arrangement(row, "ma20", "ma60", "ma120", tolerance)
 
     def _is_near_price(self, price, target, tolerance=0.05):
         """检查价格是否在目标价格的 tolerance 范围内（默认±5%）"""
-        return target * (1 - tolerance) <= price <= target * (1 + tolerance)
+        return is_near_price(price, target, tolerance)
 
     # ==================== 完整分析流程 ====================
 
@@ -813,6 +811,7 @@ class TrendTradingAnalyzer:
                 strength = "STRONG" if health_score < 40 else "MEDIUM"
                 signals['sell_signals'].append({
                     'type': 'SELL',
+                    'price': price,   # 供 K 线图标出卖出点
                     'signal': '顶部构造 + 趋势走弱',
                     'strength': strength,
                     'trend_direction': trend_direction,
@@ -829,6 +828,7 @@ class TrendTradingAnalyzer:
         if '排列：形成空头排列' in construction and health_score < 50:
             signals['sell_signals'].append({
                 'type': 'SELL',
+                'price': price,   # 供 K 线图标出卖出点
                 'signal': '趋势转折完成',
                 'strength': 'STRONG',
                 'trend_direction': trend_direction,
@@ -859,6 +859,7 @@ class TrendTradingAnalyzer:
                 support_level = "MA60" if ma60_break else "MA20"
                 signals['sell_signals'].append({
                     'type': 'SELL',
+                    'price': price,   # 供 K 线图标出卖出点
                     'signal': f'跌破{support_level}',
                     'strength': strength,
                     'trend_direction': trend_direction,
@@ -878,6 +879,7 @@ class TrendTradingAnalyzer:
             if bias_rate > 10:  # 乖离率超过 10%（原 8%）
                 signals['sell_signals'].append({
                     'type': 'SELL',
+                    'price': price,   # 供 K 线图标出卖出点
                     'signal': '高位偏离卖出',
                     'strength': 'MEDIUM',
                     'trend_direction': trend_direction,
@@ -903,6 +905,7 @@ class TrendTradingAnalyzer:
                 if prev_bullish and health_score < 55:
                     signals['sell_signals'].append({
                         'type': 'SELL',
+                        'price': price,   # 供 K 线图标出卖出点
                         'signal': '趋势放缓卖出',
                         'strength': 'MEDIUM',
                         'trend_direction': trend_direction,
@@ -1097,50 +1100,46 @@ class TrendTradingAnalyzer:
                     'message': '历史数据不足，无法生成 K 线图'
                 }
 
-            # 转换为 DataFrame 并计算均线
+            # 转换为 DataFrame 并计算均线（走共享指标层 `ma_indicators.add_ma`）
             df = pd.DataFrame(historical_data)
             df = df.sort_values('date')
-
-            # 计算均线
-            df['ma5'] = df['close'].rolling(window=5).mean()
-            df['ma20'] = df['close'].rolling(window=20).mean()
-            df['ma60'] = df['close'].rolling(window=60).mean()
-            df['ma120'] = df['close'].rolling(window=120).mean()
+            df = add_ma(df, [5, 20, 60, 120])
 
             # 获取实时价格
             stock_obj = {'code': stock_code, 'name': stock_name}
             real_time_info = get_stock_info(stock_obj)
             current_price = real_time_info.get('price') if real_time_info else None
 
-            # 使用趋势分析器获取买卖信号和密集成交区
-            analysis_result = self.analyze_stock_trend(stock_code, stock_name)
+            # **复用同一份 df** 直接跑分析：原实现又调了一次 `analyze_stock_trend`，
+            # 会重复取一次历史数据 + 重算一遍均线（该函数内部自己算）。
+            analysis = self._run_full_analysis(df)
+            trading_signals = self._generate_trading_signals(analysis)
 
-            # 提取买卖信号
+            # 提取买卖信号（原始 signal 自带 price；sell 信号本身无 price，故不落图）
             buy_signals = []
             sell_signals = []
-            if analysis_result.get('success') and analysis_result.get('trading_signals'):
-                for signal in analysis_result['trading_signals'].get('buy_signals', []):
-                    signal_price = signal.get('price')
-                    if signal_price:
-                        # 找到最接近信号价格的日期
-                        closest_idx = (df['close'] - signal_price).abs().idxmin()
-                        buy_signals.append({
-                            'date': df.loc[closest_idx, 'date'],
-                            'price': float(signal_price),
-                            'signal': signal.get('signal', '买入'),
-                            'strength': signal.get('strength', 'MEDIUM')
-                        })
+            for signal in trading_signals.get('buy_signals', []):
+                signal_price = signal.get('price')
+                if signal_price:
+                    # 找到最接近信号价格的日期
+                    closest_idx = (df['close'] - signal_price).abs().idxmin()
+                    buy_signals.append({
+                        'date': df.loc[closest_idx, 'date'],
+                        'price': float(signal_price),
+                        'signal': signal.get('signal', '买入'),
+                        'strength': signal.get('strength', 'MEDIUM')
+                    })
 
-                for signal in analysis_result['trading_signals'].get('sell_signals', []):
-                    signal_price = signal.get('price')
-                    if signal_price:
-                        closest_idx = (df['close'] - signal_price).abs().idxmin()
-                        sell_signals.append({
-                            'date': df.loc[closest_idx, 'date'],
-                            'price': float(signal_price),
-                            'signal': signal.get('signal', '卖出'),
-                            'strength': signal.get('strength', 'MEDIUM')
-                        })
+            for signal in trading_signals.get('sell_signals', []):
+                signal_price = signal.get('price')
+                if signal_price:
+                    closest_idx = (df['close'] - signal_price).abs().idxmin()
+                    sell_signals.append({
+                        'date': df.loc[closest_idx, 'date'],
+                        'price': float(signal_price),
+                        'signal': signal.get('signal', '卖出'),
+                        'strength': signal.get('strength', 'MEDIUM')
+                    })
 
             # 准备 ECharts 格式的数据
             kline_data = []
@@ -1179,16 +1178,16 @@ class TrendTradingAnalyzer:
                 ma60_data.append(round(row['ma60'], 2) if pd.notna(row.get('ma60')) else None)
                 ma120_data.append(round(row['ma120'], 2) if pd.notna(row.get('ma120')) else None)
 
-            # 准备密集成交区信息
+            # 准备密集成交区信息（直接取 `_run_full_analysis` 的结果；
+            # 注意原始键名是 `is_consolidation_zone`，payload 里才重命名为 `is_zone`）
+            cons = analysis.get('consolidation') or {}
             consolidation_zone = None
-            if analysis_result.get('success') and analysis_result.get('trend_analysis'):
-                trend_analysis = analysis_result['trend_analysis']
-                if trend_analysis.get('consolidation', {}).get('is_zone'):
-                    consolidation_zone = {
-                        'upper_bound': trend_analysis['consolidation'].get('upper_bound'),
-                        'lower_bound': trend_analysis['consolidation'].get('lower_bound'),
-                        'status': trend_analysis['consolidation'].get('status')
-                    }
+            if cons.get('is_consolidation_zone'):
+                consolidation_zone = {
+                    'upper_bound': cons.get('upper_bound'),
+                    'lower_bound': cons.get('lower_bound'),
+                    'status': cons.get('status_str')
+                }
 
             return {
                 'success': True,
@@ -1205,8 +1204,8 @@ class TrendTradingAnalyzer:
                     'buy_signals': buy_signals,
                     'sell_signals': sell_signals,
                     'consolidation_zone': consolidation_zone,
-                    'trend_direction': analysis_result.get('trend_analysis', {}).get('direction', ''),
-                    'health_score': analysis_result.get('trend_analysis', {}).get('health_score', 0)
+                    'trend_direction': analysis.get('trend_direction', ''),
+                    'health_score': (analysis.get('stability') or {}).get('health_score', 0)
                 },
                 'message': f'获取 {stock_code} 的 K 线数据成功'
             }

@@ -821,50 +821,58 @@ function renderKlineChart(containerId, data, code, name) {
                         color: '#fff'
                     },
                     data: [
-                        // 买入信号 - 显示在 K 线下方
+                        // 买入信号 - 绿色大号 pin，下移到 K 线下方
                         ...data.buy_signals.map(s => ({
                             name: s.signal,
                             coord: [s.date, s.price],
                             value: '买',
                             symbol: 'pin',
-                            symbolSize: 22,
+                            symbolSize: 38,
+                            symbolOffset: [0, '70%'],
                             label: {
                                 formatter: '买',
-                                fontSize: 14,
+                                fontSize: 17,
                                 fontWeight: 'bold',
-                                color: '#fff',
-                                offset: [0, -2]
+                                color: '#fff'
                             },
                             itemStyle: {
-                                color: '#26A69A',
-                                shadowBlur: 8,
-                                shadowColor: 'rgba(38, 166, 154, 0.6)'
+                                color: '#00A65A',
+                                borderColor: '#fff',
+                                borderWidth: 2,
+                                shadowBlur: 14,
+                                shadowColor: 'rgba(0, 166, 90, 0.85)'
                             }
                         })),
-                        // 卖出信号 - 显示在 K 线上方
+                        // 卖出信号 - 红色大号 pin，上移到 K 线上方
                         ...data.sell_signals.map(s => ({
                             name: s.signal,
                             coord: [s.date, s.price],
                             value: '卖',
                             symbol: 'pin',
-                            symbolSize: 22,
+                            symbolSize: 38,
+                            symbolOffset: [0, '-70%'],
                             label: {
                                 formatter: '卖',
-                                fontSize: 14,
+                                fontSize: 17,
                                 fontWeight: 'bold',
-                                color: '#fff',
-                                offset: [0, 2]
+                                color: '#fff'
                             },
                             itemStyle: {
-                                color: '#EF5350',
-                                shadowBlur: 8,
-                                shadowColor: 'rgba(239, 83, 80, 0.6)'
+                                color: '#E53935',
+                                borderColor: '#fff',
+                                borderWidth: 2,
+                                shadowBlur: 14,
+                                shadowColor: 'rgba(229, 57, 53, 0.85)'
                             }
                         }))
                     ],
                     tooltip: {
                         formatter: function (param) {
-                            return param.name + ': ' + param.value;
+                            var d = param.data || {};
+                            var when = d.coord ? d.coord[0] : '';
+                            var at = d.coord ? d.coord[1] : '';
+                            return '<b>' + param.name + '</b>（' + d.value + '）'
+                                + '<br/>' + when + '　@ ' + at;
                         }
                     }
                 }

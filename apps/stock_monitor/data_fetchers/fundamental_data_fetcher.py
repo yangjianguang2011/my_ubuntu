@@ -21,6 +21,9 @@ REPORT_ROE_TTL = 30 * 24 * 3600
 DIV_TTL = 30 * 24 * 3600
 REVENUE_TTL = 30 * 24 * 3600
 REPORT_ROE_START_YEAR = "2005"
+# 分红率缓存 key 的版本号：v2 = 分子含中期/季度分红（旧 v1 只算 12 月年报行）。
+# **口径再变时 +1**，即可让旧缓存自然失效、下次调用强制重拉。
+DIV_CACHE_PREFIX = "div_v2"
 _ANN_FACTOR = {3: 4.0, 6: 2.0, 9: 4.0 / 3.0, 12: 1.0}
 
 _FUND_MODULE = "fundamental"
@@ -158,8 +161,9 @@ def _parse_roe_legacy(df) -> List[Dict]:
 
 def get_payout_ratio(code: str, force: bool = False) -> Optional[Dict]:
     """股利支付率（akshare 分红送配），缓存 30 天。
+    分子为该年全部现金分红（含中期/季度），分母为年报 EPS。
     返回 {'payout', 'year', 'dps', 'eps'}；不可用返回 None。"""
-    key = _key(code, "div")
+    key = _key(code, DIV_CACHE_PREFIX)
     if not force:
         cached = _cached(key, DIV_TTL, "data")
         if cached:
@@ -223,7 +227,14 @@ def get_report_revenue(code: str, force: bool = False) -> Optional[List[Dict]]:
 
 
 def _pick_annual_payout(df) -> Optional[Dict]:
-    """从 stock_fhps_detail_em 取最近年报的股利支付率。"""
+    """从 stock_fhps_detail_em 取最近年报的股利支付率（含中期/季度分红）。
+
+    东财明细里「中期分红(6/30)」「三季报分红(9/30)」「季度分红(3/31)」是独立行，
+    只认 12 月行会把它们漏掉，支付率被系统性低估。故：
+      - 分子：同一报告期年份的**全部**现金分红行累加（每10股派息 → 每股）；
+      - 分母：该年 12 月年报行的「每股收益」（年报 EPS）；
+      - 只保留有年报 EPS 的年份，取其中最新的一年。
+    """
     if df is None or getattr(df, "empty", True):
         return None
     col = {str(c): c for c in df.columns}
@@ -236,7 +247,7 @@ def _pick_annual_payout(df) -> Optional[Dict]:
     agg: Dict[int, Dict] = {}
     for _, r in df.iterrows():
         d = str(r.get(c_rp, ""))[:10]
-        if len(d) < 7 or d[5:7] != "12":
+        if len(d) < 7:
             continue
         try:
             dps = float(r[c_dps]) / 10.0
@@ -244,10 +255,13 @@ def _pick_annual_payout(df) -> Optional[Dict]:
             year = int(d[:4])
         except (TypeError, ValueError):
             continue
-        if dps != dps or eps != eps or dps <= 0 or eps <= 0:
+        if dps != dps or dps <= 0:
             continue
-        a = agg.setdefault(year, {"dps": 0.0, "eps": eps})
+        a = agg.setdefault(year, {"dps": 0.0, "eps": None})
         a["dps"] += dps
+        if d[5:7] == "12" and eps == eps and eps > 0:
+            a["eps"] = eps
+    agg = {y: a for y, a in agg.items() if a["eps"]}
     if not agg:
         return None
     year = max(agg)

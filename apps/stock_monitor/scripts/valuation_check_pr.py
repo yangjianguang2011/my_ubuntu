@@ -2,7 +2,7 @@
 """市赚率口径自检（离线，不依赖 stockdb / 网络）。
 
 覆盖：
-  1) payout_to_n：分红率 → 修正系数 N 的分段与线性插值（0830 文口径）；
+  1) payout_to_n：分红率 → 修正系数 N（丁宁口径 N = 50% ÷ 支付率，截断 [1, 2]）；
   2) avg_roe_from_reports：多年平均 ROE（近 N 个年报均值 / 退化路径）；
   3) 市赚率合成算例：PE 20 / ROE 15% → 1.33（0830 文数字）；
   4) N 生效：修正市赚率 = N × PR；多口径列存在性。
@@ -18,6 +18,7 @@ ensure_project_root()
 import pandas as pd  # noqa: E402
 
 from stock_monitor.analyzers.factor_valuation import (  # noqa: E402
+    ROE_AVG_YEARS,
     avg_roe_from_reports,
     compute_valuation_metrics,
     payout_to_n,
@@ -50,20 +51,28 @@ def _mk_df(pb: float, pe: float, n: int = 10) -> pd.DataFrame:
 
 
 def main() -> int:
-    print("== payout_to_n（分红率 → N，0830 文：≥50%→1.0 / ≤25%→2.0 / 中间线性）==")
+    print("== payout_to_n（分红率 → N，丁宁文：N = 50% ÷ 支付率，截断 [1, 2]）==")
     check("分红率 50% -> N", payout_to_n(0.50), 1.0)
-    check("分红率 25% -> N", payout_to_n(0.25), 2.0)
-    check("分红率 37.5% -> N", payout_to_n(0.375), 1.5)
-    check("分红率 60% -> N（上限截断）", payout_to_n(0.60), 1.0)
+    check("分红率 40% -> N = 50/40", payout_to_n(0.40), 1.25)
+    check("分红率 37.5% -> N = 50/37.5", payout_to_n(0.375), 50.0 / 37.5)
+    check("分红率 33% -> N（邮储：分红 30%→33% 应涨 10%）", payout_to_n(0.33), 50.0 / 33.0)
+    check("分红率 30% -> N = 50/30", payout_to_n(0.30), 50.0 / 30.0)
+    check("分红率 25% -> N（下限截断）", payout_to_n(0.25), 2.0)
     check("分红率 10% -> N（下限截断）", payout_to_n(0.10), 2.0)
+    check("分红率 60% -> N（上限截断）", payout_to_n(0.60), 1.0)
+    check("N 单调性：30% 的 N 应大于 33% 的 N",
+          float(payout_to_n(0.30) > payout_to_n(0.33)), 1.0)
     check("分红率 None -> N=1.0", payout_to_n(None), 1.0)
     check("分红率 NaN -> N=1.0", payout_to_n(float("nan")), 1.0)
+    # 邮储 30%→33% 例句：N 之比 = 33/30 = 1.10，即股价理应涨 10%
+    check("N(30%)/N(33%) = 1.10", payout_to_n(0.30) / payout_to_n(0.33), 1.10, 1e-6)
 
     print("\n== avg_roe_from_reports（多年平均 ROE，小数）==")
     reps = [{"report_date": f"{2020 + i}-12-31", "roe": 10.0 + 10 * i, "roe_ann": 10.0 + 10 * i}
             for i in range(6)]
-    check("近 5 年年报均值（取最近 5 期）", avg_roe_from_reports(reps),
-          (20 + 30 + 40 + 50 + 60) / 5 / 100.0)
+    tail = [10.0 + 10 * i for i in range(6)][-ROE_AVG_YEARS:]
+    check(f"近 {ROE_AVG_YEARS} 年年报均值（ROE_AVG_YEARS，取最近 {len(tail)} 期）",
+          avg_roe_from_reports(reps), sum(tail) / len(tail) / 100.0)
     check("无年报时退化为年化 ROE 均值",
           avg_roe_from_reports([{"report_date": "2026-06-30", "roe": 8.0, "roe_ann": 16.0}]), 0.16)
     check_true("空列表 -> None", avg_roe_from_reports([]) is None)
@@ -80,7 +89,7 @@ def main() -> int:
     print("\n== N 生效：修正市赚率 = N × PR ==")
     m3 = compute_valuation_metrics(_mk_df(pb=3.0, pe=20.0), payout_ratio=0.43)
     n = float(m3["n"].iloc[-1])
-    check("支付率 43% -> N", n, 1.0 + (0.5 - 0.43) / 0.25)
+    check("支付率 43% -> N = 50/43", n, 0.5 / 0.43)
     check("pr_adj = N × pr", float(m3["pr_adj"].iloc[-1]), n * float(m3["pr"].iloc[-1]))
     check("缺分红数据 -> N=1.0", float(compute_valuation_metrics(
         _mk_df(pb=3.0, pe=20.0))["n"].iloc[-1]), 1.0)
@@ -91,6 +100,10 @@ def main() -> int:
     check_true("有季报 -> pr_avg 列存在",
                "pr_avg" in compute_valuation_metrics(_mk_df(pb=3.0, pe=20.0),
                                                      roe_reports=reps).columns)
+    check_true("有季报 -> roe_step_b_pct 列存在（面板 ROE 位置用）",
+               "roe_step_b_pct" in compute_valuation_metrics(_mk_df(pb=3.0, pe=20.0),
+                                                             roe_reports=reps).columns)
+    check_true("roe_impl_pct 列存在（隐含ROE 历史位置用）", "roe_impl_pct" in m.columns)
 
     print()
     if _failed:

@@ -68,7 +68,7 @@ def _dates(metrics: pd.DataFrame) -> List[str]:
 
 
 def _extract_chart(metrics: pd.DataFrame, events: List[Dict], primary: str) -> dict:
-    """ECharts 四层时序所需数据。"""
+    """ECharts 三层时序所需数据（第2层右轴挂季报年化 ROE 原始值）。"""
     chart = {"dates": _dates(metrics)}
 
     # 第1层：收盘价
@@ -80,6 +80,10 @@ def _extract_chart(metrics: pd.DataFrame, events: List[Dict], primary: str) -> d
                 "pb_pct", "pe_ttm_pct"):
         if col in metrics.columns:
             chart[col] = _s2list(metrics[col])
+
+    # 第2层右轴：季报年化 ROE 原始值（小数，前端 ×100 显示；图例默认隐藏）
+    if "roe_step_b" in metrics.columns and metrics["roe_step_b"].notna().any():
+        chart["roe_step_b"] = _s2list(metrics["roe_step_b"])
 
     # 第3层：市赚率位置（两口径 pct）
     for col in ("pr_pct", "pr_avg_pct"):

@@ -298,6 +298,34 @@ def get_stocks_info_batch(stocks) -> dict:
     return out
 
 
+def _fetch_historical_from_stockdb(stock_code: str, days: int) -> list:
+    """A 股历史日线（**stockdb 本地库，前复权 qfq**），返回与 akshare 路径同构的 records。
+
+    口径说明：stockdb 用 `fq="qfq"`（前复权），与**估值 / 基金 / 市场温度 / 选股**同一口径；
+    仅在 stockdb 无数据或不可用时才回退 akshare（回退路径也已改为 `adjust="qfq"` 保持一致）。
+    ⚠️ 港股（5 位代码）stockdb 无数据，调用方应直接走 akshare。
+    """
+    from .stockdb_data_fetcher import get_daily
+
+    try:
+        start = (datetime.now() - timedelta(days=days) - timedelta(days=7)).strftime("%Y%m%d")
+        df = get_daily(stock_code.zfill(6), start=start, fq="qfq")
+        if df is None or df.empty:
+            return []
+        df = df.copy()
+        df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
+        keep = [c for c in ("date", "open", "high", "low", "close", "volume") if c in df.columns]
+        df = df[keep].sort_values("date").tail(days)
+        if "volume" in df.columns:
+            df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(0)
+        logger.info(f"stockdb 取 {stock_code} 历史数据成功：{len(df)} 行（前复权）")
+        return df.to_dict("records")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            f"stockdb 取 {stock_code} 历史数据失败，回退 akshare：{type(e).__name__}: {e}")
+        return []
+
+
 def _fetch_historical_data(stock_code, days=365):
     """
     获取股票历史数据
@@ -312,6 +340,16 @@ def _fetch_historical_data(stock_code, days=365):
     )  # 缓存 1 天
     if cached_data is not None:
         return cached_data
+
+    # ① A 股（6 位）优先走 **stockdb 本地库（前复权）** —— 全系统统一口径、且无需额度
+    #    港股（5 位）stockdb 无数据 → 直接落到下面的 akshare 分支
+    code6, is_hk = determine_market_type(stock_code)
+    if is_hk is False:
+        rows = _fetch_historical_from_stockdb(code6, days)
+        if rows:
+            set_stock_cache_data(cache_key, rows)
+            return rows
+        logger.warning(f"stockdb 无 {stock_code} 历史数据，回退 akshare")
 
     try:
         # 根据股票代码判断市场类型
@@ -453,7 +491,7 @@ def _fetch_historical_data(stock_code, days=365):
                 df = ak.stock_zh_a_hist(
                     symbol=stock_code.zfill(6),
                     period="daily",
-                    adjust="",
+                    adjust="qfq",  # 前复权：与 stockdb 主路径口径一致
                     start_date=start_date_str,
                     end_date=end_date_str,
                 )
@@ -473,7 +511,7 @@ def _fetch_historical_data(stock_code, days=365):
                         "sh" if stock_code.zfill(6).startswith("6") else "sz"
                     )
                     df = ak.stock_zh_a_daily(
-                        symbol=f"{market_prefix}{stock_code.zfill(6)}", adjust=""
+                        symbol=f"{market_prefix}{stock_code.zfill(6)}", adjust="qfq"
                     )
                     if df is not None and not df.empty:
                         logger.info(f"日線數據接口獲取 {stock_code} 歷史數據成功")
@@ -492,7 +530,7 @@ def _fetch_historical_data(stock_code, days=365):
                         symbol=stock_code.zfill(6),
                         start_date="",
                         end_date="",
-                        adjust="",
+                        adjust="qfq",  # 前复权：与 stockdb 主路径口径一致
                     )
                     if df is not None and not df.empty:
                         logger.info(f"騰訊接口獲取 {stock_code} 歷史數據成功")
@@ -606,165 +644,6 @@ def _fetch_historical_data(stock_code, days=365):
         return []
 
 
-def _calculate_technical_indicators(historical_data):
-    """
-    计算技术指标（基于5、20、60日均线）
-    :param historical_data: 历史数据
-    :return: 技术指标字典
-    """
-    if not historical_data or len(historical_data) < 5:  # 至少需要5天数据来计算5日均线
-        return {}
-
-    # 转换为DataFrame进行计算
-    df = pd.DataFrame(historical_data)
-    df = df.sort_values("date")
-
-    # 确保数值列是数值类型
-    numeric_columns = ["open", "close", "high", "low", "volume"]
-    for col in numeric_columns:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    # 计算5、20、60日移动平均线
-    df["ma5"] = df["close"].rolling(window=5).mean()
-    df["ma20"] = df["close"].rolling(window=20).mean()
-    df["ma60"] = (
-        df["close"].rolling(window=60).mean()
-        if len(df) >= 60
-        else df["close"].rolling(window=len(df)).mean()
-    )
-
-    # 计算其他技术指标
-    # RSI
-    if len(df) >= 14:
-        delta = df["close"].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        rs = gain / loss
-        df["rsi"] = 100 - (100 / (1 + rs))
-    else:
-        df["rsi"] = np.nan
-
-    # MACD
-    if len(df) >= 26:
-        exp1 = df["close"].ewm(span=12).mean()
-        exp2 = df["close"].ewm(span=26).mean()
-        df["dif"] = exp1 - exp2
-        df["dea"] = df["dif"].ewm(span=9).mean()
-        df["macd"] = (df["dif"] - df["dea"]) * 2
-    else:
-        df["dif"] = np.nan
-        df["dea"] = np.nan
-        df["macd"] = np.nan
-
-    # 乖离率（基于5、20、60日均线）
-    df["bias_ma5"] = ((df["close"] - df["ma5"]) / df["ma5"] * 100).round(2)
-    df["bias_ma20"] = ((df["close"] - df["ma20"]) / df["ma20"] * 100).round(2)
-    df["bias_ma60"] = (
-        ((df["close"] - df["ma60"]) / df["ma60"] * 100).round(2)
-        if "ma60" in df.columns
-        else np.nan
-    )
-
-    # 趋势判断（基于5、20、60日均线）
-    latest = df.iloc[-1]
-
-    def _determine_trend_status_5_20_60(latest_row):
-        ma5 = latest_row["ma5"]
-        ma20 = latest_row["ma20"]
-        ma60 = latest_row["ma60"] if "ma60" in latest_row else np.nan
-
-        if pd.notna(ma5) and pd.notna(ma20) and pd.notna(ma60):
-            if ma5 > ma20 > ma60:
-                return "多头排列（强势）"
-            elif ma5 > ma20 and ma20 > ma60 * 0.98:  # 允许轻微偏差
-                return "多头排列（偏强）"
-            elif ma5 < ma20 < ma60:
-                return "空头排列（弱势）"
-            elif ma5 < ma20 and ma20 < ma60 * 1.02:  # 允许轻微偏差
-                return "空头排列（偏弱）"
-            else:
-                return "均线缠绕（震荡）"
-        else:
-            return "数据不足"
-
-    trend_status = _determine_trend_status_5_20_60(latest)
-
-    # 获取最新的技术指标值
-    indicators = {
-        "ma5": round(latest["ma5"], 2) if pd.notna(latest["ma5"]) else None,
-        "ma20": round(latest["ma20"], 2) if pd.notna(latest["ma20"]) else None,
-        "ma60": (
-            round(latest["ma60"], 2)
-            if "ma60" in latest and pd.notna(latest["ma60"])
-            else None
-        ),
-        "rsi": round(latest["rsi"], 2) if pd.notna(latest["rsi"]) else None,
-        "macd": round(latest["macd"], 4) if pd.notna(latest["macd"]) else None,
-        "dif": round(latest["dif"], 4) if pd.notna(latest["dif"]) else None,
-        "dea": round(latest["dea"], 4) if pd.notna(latest["dea"]) else None,
-        "bias_ma5": (
-            round(latest["bias_ma5"], 2) if pd.notna(latest["bias_ma5"]) else None
-        ),
-        "bias_ma20": (
-            round(latest["bias_ma20"], 2) if pd.notna(latest["bias_ma20"]) else None
-        ),
-        "bias_ma60": (
-            round(latest["bias_ma60"], 2) if pd.notna(latest["bias_ma60"]) else None
-        ),
-        "trend_status": trend_status,
-        "volume_ratio": latest.get("volume_ratio", 1.0),
-        "turnover_rate": latest.get("turnover_rate", 0.0),
-    }
-
-    return indicators
-
-
-def get_enhanced_stock_info(stock):
-    """
-    获取增强的股票信息，包含技术指标
-    :param stock: 股票对象，包含name和code字段
-    :return: 包含技术指标的股票信息字典
-    """
-    stock_code = stock["code"]
-    stock_name = stock["name"]
-
-    # 使用股票名称和代码作为缓存键
-    cache_key = f"enhanced_stock_info_{stock_name}_{stock_code}"
-    cached_data = get_stock_cached_data(cache_key, cache_duration=1800)  # 缓存30分钟
-    if cached_data is not None:
-        return cached_data
-
-    logger.info(f"开始获取增强的股票 {stock_name}({stock_code}) 信息")
-
-    try:
-        # 获取基础股票信息
-        basic_info = get_stock_info(stock)
-
-        # 获取历史数据用于计算技术指标
-        historical_data = _fetch_historical_data(stock_code, days=365)
-
-        # 计算技术指标
-        tech_indicators = _calculate_technical_indicators(historical_data)
-
-        # 合并数据
-        enhanced_info = {**basic_info, **tech_indicators}
-
-        # 缓存增强的信息
-        set_stock_cache_data(cache_key, enhanced_info)
-
-        logger.info(f"tech_indicators: {tech_indicators}")
-        logger.info(
-            f"增强的股票 {stock_name}({stock_code}) 信息获取完成: {enhanced_info}"
-        )
-        logger.info(f"股票 {stock_name}({stock_code}) 增强信息获取完成")
-        return enhanced_info
-    except Exception as e:
-        logger.error(f"获取增强股票信息 {stock_name}({stock_code}) 时出错: {str(e)}")
-        # 返回基础信息，即使技术指标计算失败
-        return get_stock_info(stock)
-
-
 def get_stock_price_by_code(stock_code):
     """
     根据股票代码获取股票价格
@@ -807,7 +686,6 @@ if __name__ == "__main__":
         ]
     stock = {"name": "金力永磁", "code": "300748"}
 
-    enhanced_info = get_enhanced_stock_info(stock)
     print(f"获取到增强股票信息: {enhanced_info}")
 
     # if stocks:
@@ -816,7 +694,6 @@ if __name__ == "__main__":
     #         print(f"\n测试第 {i+1} 只股票: {stock['name']}({stock['code']})")
     #         stock_info = get_stock_info(stock)
     #         print(f"获取到股票信息: 价格={stock_info.get('price')}, 涨跌幅={stock_info.get('change_pct')}")
-    #         enhanced_info = get_enhanced_stock_info(stock)
     #         print(f"获取到增强股票信息: {enhanced_info}")
 
     #     print("\n2. 测试获取股票价格:")

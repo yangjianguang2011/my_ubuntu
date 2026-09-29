@@ -166,10 +166,12 @@
             }).join('')
             + '</tbody>';
         var sig = (meta && meta.signal_name) ? meta.signal_name : '估值读数';
-        var bt = (meta && meta.buy_threshold !== undefined && meta.buy_threshold !== null) ? meta.buy_threshold : 0.10;
-        var st = (meta && meta.sell_threshold !== undefined && meta.sell_threshold !== null) ? meta.sell_threshold : 0.90;
+        // 阈值一律以后端 meta 为准；缺失时显示 —，不再用 0.10/0.90 假数字兜底
+        var bt = (meta && meta.buy_threshold !== undefined) ? meta.buy_threshold : null;
+        var st = (meta && meta.sell_threshold !== undefined) ? meta.sell_threshold : null;
+        var fmtThr = function (v) { return (v === null || v === undefined) ? '—' : v.toFixed(2); };
         var trg = (meta && meta.triggers) ? meta.triggers.length : 0;
-        var note = '生效阈值：买 ≤ ' + bt.toFixed(2) + ' / 卖 ≥ ' + st.toFixed(2)
+        var note = '生效阈值：买 ≤ ' + fmtThr(bt) + ' / 卖 ≥ ' + fmtThr(st)
             + '（' + esc(sig) + '）· 二态机交易 ' + buyN + ' 笔买 / ' + sellN + ' 笔卖'
             + ' · 多次触发标记 ' + trg + ' 个（每次进入极端区，图上全画，不影响交易归并）';
         $('vl-events-note').textContent = note;
@@ -200,7 +202,7 @@
             + ' / 卖≥' + (stats.sell_threshold !== undefined ? stats.sell_threshold.toFixed(2) : '—') + '</div>';
     }
 
-    // ---- ECharts 四层时序图 ----
+    // ---- ECharts 三层时序图 ----
     function renderChart(d, meta) {
         var el = $('vl-chart');
         if (!window.echarts) { el.innerHTML = '<p style="color:#999;">ECharts 未加载</p>'; return; }
@@ -218,10 +220,11 @@
         };
     }
 
-    function pctLine(name, data, color, gridIdx, withRef) {
+    function pctLine(name, data, color, gridIdx, withRef, yAxisIdx) {
         var s = {
             name: name, type: 'line', data: data || [],
-            xAxisIndex: gridIdx, yAxisIndex: gridIdx,
+            xAxisIndex: gridIdx,
+            yAxisIndex: (yAxisIdx === undefined || yAxisIdx === null) ? gridIdx : yAxisIdx,
             symbol: 'none', lineStyle: { width: 1.3, color: color },
             itemStyle: { color: color }, connectNulls: true,
         };
@@ -233,11 +236,14 @@
         var dates = d.dates || [];
         var grids = [], xAxes = [], yAxes = [], series = [];
 
+        // 有季报 ROE 时才挂第2层右轴：提前算，网格留出右侧刻度空间
+        var hasRoe = (d.roe_step_b !== undefined && d.roe_step_b !== null);
+
         // 三层网格（价格周期已移除，见 docs：纯价格与第1层重复）
         var gridTops = ['4%', '37%', '70%'];
         var legendTops = ['1%', '34%', '67%'];
         for (var i = 0; i < 3; i++) {
-            grids.push({ left: 64, right: 28, top: gridTops[i], height: '25%' });
+            grids.push({ left: 64, right: (i === 1 && hasRoe) ? 54 : 28, top: gridTops[i], height: '25%' });
             xAxes.push({
                 type: 'category', gridIndex: i, data: dates,
                 boundaryGap: false,
@@ -252,6 +258,18 @@
         // 第2/3层：0~1 历史位置
         for (var j = 1; j < 3; j++) {
             yAxes.push({ gridIndex: j, min: 0, max: 1, interval: 0.5, axisLabel: { fontSize: 10 } });
+        }
+        // 第2层右轴（index=3）：季报年化 ROE 原始值(%)；仅当有数据时挂，保证轴号确定
+        var ROE_AXIS = yAxes.length;
+        if (hasRoe) {
+            yAxes.push({
+                gridIndex: 1, position: 'right', scale: true, splitNumber: 4,
+                splitLine: { show: false },
+                axisLabel: {
+                    fontSize: 10,
+                    formatter: function (v) { return (v * 100).toFixed(0) + '%'; },
+                },
+            });
         }
 
         // 第1层：收盘价 + 买卖标记
@@ -268,7 +286,7 @@
             symbol: 'triangle', symbolSize: 10, symbolRotate: 180, itemStyle: { color: '#c0392b' },
         });
 
-        // 各层曲线定义：[key, 名称, 颜色, 默认显示, 挂 0.10/0.90 参考线]
+        // 各层曲线定义：[key, 名称, 颜色, 默认显示, 挂 0.10/0.90 参考线, yAxisIndex(可选，默认=层号)]
         // 第 1 层默认显示"实际信号源"（meta.signal_col）
         var sigCol = (meta && meta.signal_col) || 'pb_adj_b_pct';
         var l1 = [];
@@ -289,6 +307,10 @@
                 ['pr_pct', '市赚率·推导ROE', '#2980b9', false, false],
             ],
         };
+        // 第二层补一条 ROE 曲线：季报年化 ROE 原始值(%)，走右轴，图例默认隐藏
+        if (hasRoe) {
+            layerDefs[1].push(['roe_step_b', '季报年化ROE(%)·右轴', '#d35400', false, false, ROE_AXIS]);
+        }
 
         // 每层一个 legend（放在该层网格上方）；selected 控制默认显隐
         var legends = [{
@@ -300,7 +322,7 @@
             var names = [], sel = {};
             (layerDefs[li] || []).forEach(function (c) {
                 if (d[c[0]] !== undefined && d[c[0]] !== null) {
-                    series.push(pctLine(c[1], d[c[0]], c[2], li, c[4]));
+                    series.push(pctLine(c[1], d[c[0]], c[2], li, c[4], c[5]));
                     names.push(c[1]);
                     sel[c[1]] = c[3];
                 }

@@ -1,25 +1,25 @@
 # -*- coding: utf-8 -*-
 """
-选股批量编排 —— 股票池 → 一次批量取日线 → 逐只判定 → 结果快照。
+选股批量编排 —— 股票池 → **技术面粗筛 → 估值面精筛** → 结果快照。
 
-设计：
-  1. 单例 `ScreenRunner`：同一时刻只允许一个扫描任务（`_lock`），避免多线程打爆外部行情源。
-  2. 扫描在后台 daemon 线程执行，进度/中间结果通过 job 对象共享，供 Web 轮询：
-       GET /api/picker/status  →  {running, pool, done, total, matched, partial, progress_pct}
-  3. 数据来源（原实现在 `stock_picker/`，已废弃）：
-       * 成分股 → `data_fetchers.pool_data_fetcher.load_pool`（akshare + cache.db）
-       * 日线   → `data_fetchers.stockdb_data_fetcher.get_raw`（stockdb **本地库**，
-                  500 只**一次批量**，替代原「akshare 逐只拉 300~500 次 + 自建 sqlite 缓存」）
-  4. 每次跑完追加一份结果快照到 `cache.db` 的 `long_term_storage`
-     （`module_type="picker_run"`，key = `picker_run_<时间戳>`），供"我的选股历史"回看；
-     只保留最近 `SNAPSHOT_KEEP` 份。**不落任何磁盘文件。**
+设计（「灵活融合」的编排侧）：
+  1. **条件清单驱动**：启用的条件来自 `analyzers/conditions.py` 的注册表，
+     本模块**不写死任何条件**；加条件只需注册。
+  2. **分层（性能关键）**：
+       ① 池 → 批量取日K（1 次）→ 算均线 → 评估**技术面**条件
+       ② 只对通过 ① 的（预计 300 → 30~80 只）→ 取估值读数 → 评估**估值面**条件
+     估值读数走 `valuation_engine.compute_readings`（轻量、按天缓存）；
+     `need_ps=False` 时**不拉营业收入**，全池约 31s（hs300 实测）。
+  3. 单例 `ScreenRunner`：同一时刻只允许一个扫描任务。
+  4. 每次跑完把「条件清单 + 参数 + 结果」存 `cache.db` 的 `long_term_storage`
+     （`module_type="picker_run"`），只保留最近 `SNAPSHOT_KEEP` 份。
 """
 from __future__ import annotations
 
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 
@@ -34,14 +34,22 @@ from ..core.cache_with_database import (
 from ..core.runner_base import finish_task, start_task
 from ..data_fetchers.pool_data_fetcher import POOL_NAME, load_pool
 from ..data_fetchers.stockdb_data_fetcher import get_raw
-from .picker_rules import Params, evaluate_all
+from .conditions import (
+    GROUP_TECH,
+    GLOBAL_PARAMS,
+    all_conditions,
+    get_condition,
+    normalize_params,
+)
+from .ma_indicators import add_ma
 
 logger = setup_logger(__name__)
 
 SNAPSHOT_KEEP = 50                      # 历史快照最多保留份数
 _RUN_MODULE = "picker_run"
-# 批量取日线所需字段（够算 MA/量能即可）
 _KLINE_FIELDS = "date,code,open,high,low,close,volume"
+# 技术面尾部窗口的固定余量（斜率/乖离/回踩/量能等窗口都很小，70 足够）
+_TAIL_BUFFER = 70
 
 
 @dataclass
@@ -51,31 +59,36 @@ class ScreenStatus:
     pool_label: str = ""
     total: int = 0
     done: int = 0
-    matched: List[dict] = field(default_factory=list)  # 完整命中：含 reasons
-    partial: List[dict] = field(default_factory=list)  # 分规则命中(观察)
+    matched: List[dict] = field(default_factory=list)
+    partial: List[dict] = field(default_factory=list)
     failed: int = 0
     message: str = ""
     error: str = ""
     run_id: Optional[str] = None
     started_at: str = ""
     finished_at: str = ""
+    # —— 融合相关 ——
+    stage: str = ""                       # 当前阶段（技术面粗筛 / 估值面精筛 / 完成）
+    conditions: List[str] = field(default_factory=list)   # 本次启用的条件 id
+    tech_passed: int = 0                  # 通过技术面的只数（= 估值精筛的输入）
+    val_scanned: int = 0                  # 实际算了估值的只数
+    # —— 阶段进度：`done`/`stage_total` 描述**当前阶段**，与池大小 `total` 分离，
+    #    避免「估值精筛 27 只却按 300 算百分比」导致进度条倒退。
+    stage_total: int = 0
 
     def to_dict(self) -> Dict:
         return {
-            "running": self.running,
-            "pool": self.pool,
-            "pool_label": self.pool_label,
-            "total": self.total,
-            "done": self.done,
-            "progress_pct": round(self.done / self.total * 100, 1) if self.total else 0,
-            "matched": self.matched,
-            "partial": self.partial,
-            "failed": self.failed,
-            "message": self.message,
-            "error": self.error,
-            "run_id": self.run_id,
-            "started_at": self.started_at,
-            "finished_at": self.finished_at,
+            "running": self.running, "pool": self.pool, "pool_label": self.pool_label,
+            "total": self.total,                     # 池大小
+            "done": self.done,                       # 当前阶段已完成
+            "stage_total": self.stage_total or self.total,
+            "progress_pct": (round(self.done / (self.stage_total or self.total) * 100, 1)
+                             if (self.stage_total or self.total) else 0),
+            "matched": self.matched, "partial": self.partial, "failed": self.failed,
+            "message": self.message, "error": self.error, "run_id": self.run_id,
+            "started_at": self.started_at, "finished_at": self.finished_at,
+            "stage": self.stage, "conditions": self.conditions,
+            "tech_passed": self.tech_passed, "val_scanned": self.val_scanned,
         }
 
 
@@ -89,24 +102,31 @@ class ScreenRunner:
         self.status = ScreenStatus()
 
     # -- 对外接口 ---------------------------------------------------------- #
-    def start(self, params_dict: Optional[dict] = None, pool: str = "hs300",
-              force_refresh: bool = False):
-        """立即跑一次后台扫描；若已在跑则返回当前状态(不重启)。
+    def start(self, conditions: Optional[dict] = None,
+              global_params: Optional[dict] = None,
+              legacy_params: Optional[dict] = None,
+              pool: str = "hs300", force_refresh: bool = False):
+        """启动扫描。`pool`/参数非法会**同步抛 ValueError**（供 Web 层返回 400）。
 
-        `pool` / `params` 非法会**同步抛 `ValueError`**（供 Web 层返回 400）。
+        `conditions`：`{cid: {"enabled": bool, "params": {...}}}`；
+        未给 `conditions` 而给了 `legacy_params`（旧格式）时，映射为原有 4 条件。
         """
-        params = Params.from_dict(params_dict or {})
         if pool not in POOL_NAME:
             raise ValueError(f"未知的股票池: {pool}，可选: {list(POOL_NAME)}")
 
+        plan = build_plan(conditions, global_params, legacy_params)
+        if not plan["enabled"]:
+            raise ValueError("至少需要启用一个条件")
+
         def _make_status():
-            st = ScreenStatus(running=True, pool=pool,
-                              pool_label=POOL_NAME.get(pool, pool))
+            st = ScreenStatus(running=True, pool=pool, pool_label=POOL_NAME.get(pool, pool))
             st.started_at = datetime.now().isoformat(timespec="seconds")
+            st.conditions = [c.id for c, _ in plan["enabled"]]
+            st.stage = "准备中"
             return st
 
         return start_task(
-            self, _make_status, self._run_sync, (params, pool, force_refresh),
+            self, _make_status, self._run_sync, (plan, pool, force_refresh),
             name="picker_scan",
         )
 
@@ -117,7 +137,7 @@ class ScreenRunner:
         return self.status.to_dict()
 
     # -- 内部 -------------------------------------------------------------- #
-    def _run_sync(self, params: Params, pool_key: str, force_refresh: bool):
+    def _run_sync(self, plan: dict, pool_key: str, force_refresh: bool):
         self._stop.clear()
         st = self.status
         try:
@@ -129,15 +149,24 @@ class ScreenRunner:
 
             names = {r["code"]: r.get("name", "") for r in constituents}
             codes = list(names)
-            st.message = f"批量拉取 {len(codes)} 只日线…"
+            tech_conds = [(c, p) for c, p in plan["enabled"] if c.group == GROUP_TECH]
+            val_conds = [(c, p) for c, p in plan["enabled"] if c.group != GROUP_TECH]
 
-            df = self._fetch_kline(codes, self._wanted(params))
+            # ---------- ① 技术面粗筛 ----------
+            st.stage = f"技术面粗筛（{len(codes)} 只）"
+            st.stage_total = len(codes)
+            st.message = f"批量拉取 {len(codes)} 只日线…"
+            df = self._fetch_kline(codes, plan["wanted"])
             if df is None or df.empty:
                 finish_task(st, RuntimeError("批量日线为空，扫描未开始"))
                 return
 
             groups = {c: g for c, g in df.groupby("code")}
-            st.matched, st.partial = [], []
+            ma_windows = sorted({plan["global"]["ma_fast"], plan["global"]["ma_mid"],
+                                 plan["global"]["ma_slow"]})
+            ma_needs = max(ma_windows)
+
+            tech_ok: List[Tuple[str, dict, List[dict]]] = []   # (code, frame, reasons)
             for i, code in enumerate(codes):
                 if self._stop.is_set():
                     st.message = "已手动停止"
@@ -148,57 +177,157 @@ class ScreenRunner:
                     st.failed += 1
                     continue
                 try:
-                    result = evaluate_all(g.to_dict("records"), params)
+                    frame = add_ma(g, ma_windows)
                 except Exception as e:  # noqa: BLE001
-                    logger.error(f"判定失败 {names.get(code, '')}({code}): {e}")
+                    logger.error(f"均线计算失败 {names.get(code, '')}({code}): {e}")
                     st.failed += 1
                     continue
 
-                summary = {"code": code, "name": names.get(code, ""),
-                           **compact_latest(g)}
-                if result["passed"]:
-                    summary["reasons"] = result["reasons"]
-                    st.matched.append(summary)
+                reasons, passed = self._eval(frame, tech_conds, ma_needs, {})
+                if passed:
+                    tech_ok.append((code, frame, reasons))
                 else:
-                    # partial：有一项命中(任意 reason passed) 供观察
-                    on = [r for r in result["reasons"] if r["passed"]]
+                    summary = {"code": code, "name": names.get(code, ""),
+                               **compact_latest(frame)}
+                    on = [r["rule_id"] for r in reasons if r["passed"]]
                     if on:
-                        summary["hit_rules"] = [r["rule_id"] for r in on]
+                        summary["hit_rules"] = on
+                        summary["reasons"] = reasons
                         st.partial.append(summary)
                 if i % 20 == 0:
-                    st.message = f"扫描 {st.done}/{st.total}…命中 {len(st.matched)}"
+                    st.message = f"技术面粗筛 {st.done}/{st.stage_total}…通过 {len(tech_ok)}"
 
-            st.run_id = self._persist_snapshot(
-                pool_key, params, st.matched, st.total, st.failed)
-            st.message = f"完成：命中 {len(st.matched)} / 扫描 {st.done}"
+            st.tech_passed = len(tech_ok)
+            st.message = f"技术面通过 {len(tech_ok)} 只"
+            logger.info(f"技术面粗筛完成：{st.total} → {len(tech_ok)} 只")
+
+            # ---------- ② 估值面精筛（按需）----------
+            if val_conds and tech_ok:
+                from .valuation_engine import compute_readings
+
+                need_ps = any("ps" in c.needs for c, _ in val_conds)
+                st.stage = f"估值面精筛（{len(tech_ok)} 只{'，含营收' if need_ps else ''}）"
+                st.stage_total = len(tech_ok)
+                for j, (code, frame, reasons) in enumerate(tech_ok):
+                    if self._stop.is_set():
+                        st.message = "已手动停止"
+                        break
+                    st.done = j + 1
+                    st.val_scanned += 1
+                    try:
+                        readings = compute_readings(code, need_ps=need_ps)
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning(f"估值读数失败 {code}: {type(e).__name__}: {e}")
+                        readings = None
+                    r2, passed = self._eval(frame, val_conds, ma_needs, readings or {})
+                    reasons = reasons + r2
+                    summary = {"code": code, "name": names.get(code, ""),
+                               **compact_latest(frame)}
+                    if passed:
+                        summary["reasons"] = reasons
+                        st.matched.append(summary)
+                    else:
+                        on = [r["rule_id"] for r in reasons if r["passed"]]
+                        if on:
+                            summary["hit_rules"] = on
+                            summary["reasons"] = reasons
+                            st.partial.append(summary)
+                    if j % 5 == 0:
+                        st.message = f"估值精筛 {st.done}/{st.stage_total}…命中 {len(st.matched)}"
+            elif tech_conds:
+                # 只勾技术条件：技术面全过即命中
+                for code, frame, reasons in tech_ok:
+                    summary = {"code": code, "name": names.get(code, ""),
+                               **compact_latest(frame), "reasons": reasons}
+                    st.matched.append(summary)
+            else:
+                # 只勾估值条件：没有粗筛依据 → 全池精算
+                from .valuation_engine import compute_readings
+
+                need_ps = any("ps" in c.needs for c, _ in val_conds)
+                st.stage = f"估值精筛·全池（{len(codes)} 只{'，含营收' if need_ps else ''}）"
+                st.stage_total = len(codes)
+                for j, code in enumerate(codes):
+                    if self._stop.is_set():
+                        break
+                    st.done = j + 1
+                    st.val_scanned += 1
+                    g = groups.get(code)
+                    if g is None or g.empty:
+                        st.failed += 1
+                        continue
+                    frame = add_ma(g, ma_windows)
+                    try:
+                        readings = compute_readings(code, need_ps=need_ps)
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning(f"估值读数失败 {code}: {type(e).__name__}: {e}")
+                        readings = None
+                    reasons, passed = self._eval(frame, val_conds, ma_needs, readings or {})
+                    summary = {"code": code, "name": names.get(code, ""),
+                               **compact_latest(frame)}
+                    if passed:
+                        summary["reasons"] = reasons
+                        st.matched.append(summary)
+                    else:
+                        on = [r["rule_id"] for r in reasons if r["passed"]]
+                        if on:
+                            summary["hit_rules"] = on
+                            summary["reasons"] = reasons
+                            st.partial.append(summary)
+                    if j % 5 == 0:
+                        st.message = f"估值精筛 {st.done}/{st.stage_total}…命中 {len(st.matched)}"
+
+            st.stage = "完成"
+            st.run_id = self._persist_snapshot(plan, pool_key, st.matched, st.total, st.failed)
+            st.message = (
+                f"完成：命中 {len(st.matched)}"
+                + (f"（技术面通过 {st.tech_passed} / 池 {st.total}）" if st.tech_passed
+                   else f"（池 {st.total}）")
+            )
             finish_task(st)
         except Exception as e:  # noqa: BLE001
             logger.error(f"扫描异常: {e}", exc_info=True)
             finish_task(st, e)
 
     @staticmethod
-    def _wanted(params: Params) -> int:
-        """需要的交易日根数：ma_slow 有足够非空连续 + 余量。"""
-        return params.ma_slow + 70
+    def _eval(frame, conds, ma_needs: int, readings: dict):
+        """评估一组条件（纯函数）。返回 (reasons, 全部通过)。"""
+        if not conds:
+            return [], True
+        if frame is None or len(frame) < ma_needs:
+            return [{"rule_id": "data", "passed": False,
+                     "note": f"交易日({0 if frame is None else len(frame)})不足计算 {ma_needs} 日均线",
+                     "metrics": {"bars": 0 if frame is None else len(frame), "need": ma_needs}}], False
+        ctx = {"frame": frame, "readings": readings}
+        reasons, passed = [], True
+        for c, prepared in conds:
+            try:
+                r = c.evaluate(ctx, prepared)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"条件 {c.id} 评估异常: {type(e).__name__}: {e}")
+                r = {"passed": False, "note": f"评估异常：{type(e).__name__}", "metrics": {}}
+            reasons.append({"rule_id": c.id, "passed": bool(r.get("passed")),
+                            "note": r.get("note", ""), "metrics": r.get("metrics", {})})
+            passed = passed and bool(r.get("passed"))
+        return reasons, passed
 
     @staticmethod
     def _fetch_kline(codes: List[str], wanted: int) -> Optional[pd.DataFrame]:
         """一次批量取日线（stockdb 本地库），返回按 (code, date) 升序的 DataFrame。"""
-        natural = int(wanted * 7 / 5) + 60      # 交易日 -> 自然日，再留停牌/节假日余量
+        natural = int(wanted * 7 / 5) + 60
         start = (pd.Timestamp.now() - pd.Timedelta(days=natural)).strftime("%Y%m%d")
         raw = get_raw(codes, start=start, end=None, fq="qfq", fields=_KLINE_FIELDS)
         if raw is None or len(raw) == 0:
             return None
         df = raw.copy()
-        # stockdb 的 date 是 int(YYYYMMDD) -> datetime；数值列转 float
         df["date"] = pd.to_datetime(df["date"].astype("int64").astype(str), format="%Y%m%d")
         for c in ("open", "high", "low", "close", "volume"):
             if c in df.columns:
                 df[c] = pd.to_numeric(df[c], errors="coerce")
         return df.sort_values(["code", "date"]).reset_index(drop=True)
 
-    def _persist_snapshot(self, pool_key, params, matched, scanned, failed) -> Optional[str]:
-        """把本次结果写入 `long_term_storage`；返回快照 key。"""
+    def _persist_snapshot(self, plan, pool_key, matched, scanned, failed) -> Optional[str]:
+        """把本次「条件清单 + 参数 + 结果」写入 `long_term_storage`；返回快照 key。"""
         try:
             created_at = datetime.now().isoformat(timespec="seconds")
             key = f"{_RUN_MODULE}_{created_at.replace(':', '').replace('-', '')}"
@@ -207,7 +336,9 @@ class ScreenRunner:
                 {
                     "pool": pool_key,
                     "pool_label": POOL_NAME.get(pool_key, pool_key),
-                    "params": params.to_dict(),
+                    "global_params": plan["global"],
+                    "conditions": {c.id: {"params": _dump_params(c, p)}
+                                   for c, p in plan["enabled"]},
                     "matched": matched,
                     "scanned": scanned,
                     "failed": failed,
@@ -224,7 +355,6 @@ class ScreenRunner:
 
     @staticmethod
     def _trim_snapshots(keep: int = SNAPSHOT_KEEP) -> None:
-        """只保留最近 keep 份快照。"""
         try:
             rows = get_module_long_term_data(_RUN_MODULE)
             for r in rows[keep:]:
@@ -235,6 +365,92 @@ class ScreenRunner:
 
 # 模块级单例（Web/脚本共用同一任务状态）
 runner = ScreenRunner()
+
+
+# ---------------------------------------------------------------- 编排计划
+def _dump_params(c, prepared) -> dict:
+    """把条件的预生成对象还原成可 JSON 存的参数 dict。"""
+    if isinstance(prepared, dict):
+        return {k: v for k, v in prepared.items()}
+    # picker_rules.Params：只存该条件自己声明的字段
+    return {k: getattr(prepared, k, None) for k in (c.params or {})}
+
+
+def _wanted(plan: dict) -> int:
+    """本次需要的交易日根数 = 最大均线 + 余量。
+
+    关键：**金叉条件声明的回溯窗口必须真的可观测** —— ma_slow 预热会吃掉
+    `ma_slow-1` 根，故需 `ma_slow + cross_lookback_bars` 才有足够"有效行"。
+    （原实现固定 `ma_slow + 70`，导致 120 根的回溯实际只能看到约 70 根。）
+    """
+    ma_max = max(plan["global"]["ma_fast"], plan["global"]["ma_mid"], plan["global"]["ma_slow"])
+    extra = _TAIL_BUFFER
+    for c, prepared in plan["enabled"]:
+        if c.id == "golden_cross":
+            lb = getattr(prepared, "cross_lookback_bars", 0) or 0
+            extra = max(extra, int(lb) + 10)
+    return ma_max + extra
+
+
+def build_plan(conditions: Optional[dict], global_params: Optional[dict],
+               legacy_params: Optional[dict] = None) -> dict:
+    """把前端下发的「条件清单 + 全局参数」校验并预生成成执行计划。
+
+    * `conditions` 缺省而 `legacy_params` 存在 → 映射为原有 4 条件（向后兼容）
+    * 旧格式的 `legacy_params` 里**也含全局均线参数**（ma_fast/ma_mid/ma_slow），
+      需一并路由到全局参数，否则会被静默忽略（且失去范围校验）。
+    """
+    merged_global = dict(global_params or {})
+    if legacy_params:
+        for k in GLOBAL_PARAMS:
+            if k in legacy_params and k not in merged_global:
+                merged_global[k] = legacy_params[k]
+    gp = normalize_params(GLOBAL_PARAMS, merged_global)
+
+    if not conditions and legacy_params is not None:
+        # 旧格式：{ma_fast, ..., use_volume_shrink} → 原 4 条件
+        # 注：`legacy_params` 可能是**空 dict**（旧前端默认全用默认值），也要走这条映射，
+        #     故用 `is not None` 而非真值判断。
+        conditions = {
+            "structure": {"enabled": True, "params": {
+                k: legacy_params[k] for k in
+                ("min_price_above_slow_ratio", "fast_slope_min_pct", "structure_slope_window")
+                if k in legacy_params}},
+            "golden_cross": {"enabled": True, "params": {
+                k: legacy_params[k] for k in
+                ("cross_lookback_bars", "cross_min_bars_since", "cross_max_bars_since")
+                if k in legacy_params}},
+            "pullback": {"enabled": True, "params": {
+                k: legacy_params[k] for k in
+                ("pullback_min_dist_pct", "pullback_max_dist_pct", "pullback_confirm_window",
+                 "pullback_low_touch_below_pct", "pullback_low_touch_above_pct",
+                 "mid_break_tolerance_pct", "allow_close_break_mid")
+                if k in legacy_params}},
+            "volume_shrink": {"enabled": bool(legacy_params.get("use_volume_shrink")),
+                              "params": {k: legacy_params[k] for k in
+                                         ("volume_shrink_lookback", "volume_shrink_max_ratio")
+                                         if k in legacy_params}},
+        }
+
+    enabled: List[Tuple] = []
+    for c in all_conditions():
+        spec = (conditions or {}).get(c.id) or {}
+        if not spec.get("enabled"):
+            continue
+        cp = normalize_params(c.params, spec.get("params"))
+        if c.id == "volume_shrink":
+            # 软条件：沿用原语义，`use_volume_shrink` 由"是否启用"决定
+            cp = dict(cp, use_volume_shrink=True)
+        # ⚠️ 没有 `prepare` 钩子的条件（ma_arrangement / ma_slope / bias_band / 估值类）
+        #    也要拿到**全局参数**（ma_fast/ma_mid/ma_slow），否则读 p['ma_fast'] 会 KeyError。
+        #    带 `prepare` 的条件由 `_prep_rules(gp, cp)` 内部完成同样的合并。
+        prepared = c.prepare(gp, cp) if c.prepare else {**gp, **cp}
+        enabled.append((c, prepared))
+
+    plan = {"global": gp, "enabled": enabled,
+            "need_val": any(c.group != GROUP_TECH for c, _ in enabled)}
+    plan["wanted"] = _wanted(plan)      # 需要的交易日根数（含金叉回溯的窗口修正）
+    return plan
 
 
 def compact_latest(g: pd.DataFrame) -> Dict:
@@ -249,7 +465,6 @@ def compact_latest(g: pd.DataFrame) -> Dict:
     vol = last.get("volume")
     if vol is not None and vol == vol:
         out["volume"] = float(vol)
-    # 向前一根收盘估算当日涨跌幅
     if close is not None and close == close and len(g) >= 2:
         prev = g.iloc[-2].get("close")
         if prev is not None and prev == prev and float(prev):
@@ -258,7 +473,7 @@ def compact_latest(g: pd.DataFrame) -> Dict:
 
 
 def list_snapshots(limit: int = 20) -> List[dict]:
-    """查询历史扫描快照（供"我的观察历史"）。"""
+    """查询历史扫描快照（供“我的观察历史”）。"""
     rows = get_module_long_term_data(_RUN_MODULE, limit=limit)
     out = []
     for r in rows:
@@ -271,7 +486,9 @@ def list_snapshots(limit: int = 20) -> List[dict]:
             "matched_count": d.get("matched_count"),
             "failed": d.get("failed"),
             "created_at": d.get("created_at") or r.get("updated_at"),
-            "params": d.get("params") or {},
+            "global_params": d.get("global_params") or {},
+            "conditions": d.get("conditions") or {},
+            "params": d.get("params") or {},          # 旧快照兼容
         })
     return out
 

@@ -24,10 +24,20 @@ from .factor_utils import expanding_pct, rolling_pct
 from .factors_registry import Factor, register
 
 MAP_WINDOW = 1500
-PCT_MIN_PERIODS = 250
+# 分位（expanding_pct）的最少样本数
+PCT_MIN_PERIODS = int(get_path("valuation", "pct_min_periods", "250") or "250")
+# 回归窗口的最少样本数 —— **与分位门槛分开**（原来两者误共用同一个常量）。
+# 250(回归) + 250(分位) 叠成 ~500 交易日 ≈ 2 年预热，京东方/新和成的首笔买点整段错过。
+# ⚠ 默认仍取 250（= 与分开前完全等价，行为不变）；实验值 120/400 的结论见 config.ini 注释。
+REG_MIN_PERIODS = int(get_path("valuation", "reg_min_periods", "250") or "250")
 STEP_LAG_DAYS = 30
 LEVEL_WINDOW = 750
-ROE_AVG_YEARS = 5
+ROE_AVG_YEARS = 3
+# 盈利调节拟合是否带二次项（PB ~ ROE + ROE²）：**默认关**。
+# 实测（2026-09-28，京东方/新和成读数锚点）二次项对本目标无益：新和成高 ROE 区残差反而更低
+# （2026-04 读数 0.776→0.755、2020-04 0.736→0.622），读数平均绝对差 0.102→0.161。
+# 保留为实验开关，勿在生产打开。
+REG_QUAD = get_path("valuation", "reg_quad", "false").lower() in ("1", "true", "yes")
 
 # 历史位置（expanding_pct）的起算日：对齐文章口径（默认 2012-01-01，可 env/ini 覆盖）
 PCT_START_DATE = get_path("valuation", "data_start", "20120101")
@@ -45,6 +55,10 @@ LevelLike = Optional[Union[pd.Series, Dict]]
 @dataclass
 class ValuationParams:
     map_window: int = MAP_WINDOW
+    # 回归窗口最少样本（与分位门槛分开；默认 250 = 与分开前等价）
+    reg_min_periods: int = REG_MIN_PERIODS
+    # 拟合是否带二次项（默认 False；实测无益，见模块常量注释）
+    reg_quad: bool = REG_QUAD
     pct_min_periods: int = PCT_MIN_PERIODS
     step_lag_days: int = STEP_LAG_DAYS
     market_level: LevelLike = None
@@ -57,18 +71,25 @@ class ValuationParams:
 
 
 def payout_to_n(payout, hi=PAYOUT_HI, lo=PAYOUT_LO, n_hi=1.0, n_lo=2.0) -> float:
-    """股利支付率 → 修正系数 N。≥hi→1.0；≤lo→2.0；中间线性。"""
+    """股利支付率 → 修正系数 N（丁宁口径：N = 标杆支付率 ÷ 支付率）。
+
+    - ≥hi(50%) → n_hi(1.0)：50% ÷ 50%
+    - ≤lo(25%) → n_lo(2.0)：50% ÷ 25%，**上限截断**
+    - 中间 → N = hi / 支付率（倒数关系，非线性的）
+      例：40% → 1.25；33% → 1.52；30% → 1.67；25% → 2.0
+    为什么是倒数：原文「以 50% 分红比例为标杆」，40% 的分红要打 1.25 倍折扣。
+    """
     try:
         x = float(payout)
     except (TypeError, ValueError):
+        return n_hi                      # 取不到分红 → 不做质量修正
+    if x != x:                           # NaN
         return n_hi
-    if x != x:
-        return n_hi
+    if x <= lo:                          # ≤25%（含 0/负）→ 2.0，避免除零
+        return n_lo
     if x >= hi:
         return n_hi
-    if x <= lo:
-        return n_lo
-    return n_hi + (n_lo - n_hi) * (hi - x) / (hi - lo)
+    return min(n_lo, max(n_hi, hi / x))
 
 
 def avg_roe_from_reports(reports, years=ROE_AVG_YEARS) -> Optional[float]:
@@ -152,7 +173,7 @@ def revenue_ttm_from_reports(dates, reports, lag_days=STEP_LAG_DAYS) -> pd.Serie
     return pd.Series(out, index=dates.index)
 
 
-def map_residual(y, x, window, min_periods) -> pd.Series:
+def map_residual(y, x, window, min_periods, quad=False) -> pd.Series:
     """滚动 OLS 残差 —— 盈利调节的核心：`残差 = y − (a + b·x)`。
 
     本项目 y=PB（市净率），x=ROE（盈利能力）：
@@ -163,17 +184,37 @@ def map_residual(y, x, window, min_periods) -> pd.Series:
     我们读的是回归残差（0829 文称二者是"同一件事的两种做法"）。
 
     窗口 window=1500 交易日 ≈ 6 年，对应文章"用历年盈利能力解释估值"；min_periods
-    =250 保证少样本期不外推。
+    默认 250 保证少样本期不外推（由 `ValuationParams.reg_min_periods` 传入，可外置调参）。
     已知近似：ROE 生效日用"报告期+30 天"模拟公告日（NOTICE_DATE 待接入，见 docs 规格文档）。
+
+    quad=True：额外拟合二次项 `y ~ x + x²`（**窗口内对 x 居中后再取平方**，抑制两列共线；
+    共线度过高或解退化时该行自动回退一元）。默认 False —— 实测对本目标无益，见 REG_QUAD 注释。
     """
-    # 以下三行即滚动一元线性回归的两个参数：b(斜率)、a(截距)；仅用到当期 t 及以前，
-    # 无未来信息（rolling 向后看）。min_periods=250 为每个窗口最少样本数。
+    # 以下即滚动一元线性回归的两个参数：b(斜率)、a(截距)；仅用到当期 t 及以前，
+    # 无未来信息（rolling 向后看）。min_periods 为每个窗口最少样本数。
     mx = x.rolling(window, min_periods=min_periods).mean()
     my = y.rolling(window, min_periods=min_periods).mean()
-    b = (y.rolling(window, min_periods=min_periods).cov(x)
-         / x.rolling(window, min_periods=min_periods).var().replace(0, np.nan))
-    # 线性预测 = 均值 + 斜率 × 距离，残差 = 实际值 − 预测值
-    return y - (my + b * (x - mx))
+    vx = x.rolling(window, min_periods=min_periods).var()
+    lin = my + (y.rolling(window, min_periods=min_periods).cov(x) / vx.replace(0, np.nan)) * (x - mx)
+    if not quad:
+        return y - lin
+
+    p = x - mx                                   # 居中后的 ROE（降低与二次项的共线性）
+    q = p * p
+    mq = q.rolling(window, min_periods=min_periods).mean()
+    Spp = p.rolling(window, min_periods=min_periods).var()
+    Sqq = q.rolling(window, min_periods=min_periods).var()
+    Spq = p.rolling(window, min_periods=min_periods).cov(q)
+    Spy = p.rolling(window, min_periods=min_periods).cov(y)
+    Sqy = q.rolling(window, min_periods=min_periods).cov(y)
+    det = Spp * Sqq - Spq ** 2
+    with np.errstate(invalid="ignore", divide="ignore"):
+        b1 = (Spy * Sqq - Sqy * Spq) / det
+        b2 = (Sqy * Spp - Spy * Spq) / det
+    quad_pred = my + b1 * p + b2 * (q - mq)
+    # 共线度 (1 - corr²) 过低 → 二次项不可识别，该行回退一元
+    ok = (det / (Spp * Sqq).replace(0, np.nan) > 0.02) & np.isfinite(quad_pred)
+    return y - np.where(ok, quad_pred, lin)
 
 
 def market_drift(level, dates, window=LEVEL_WINDOW) -> Optional[pd.Series]:
@@ -208,6 +249,8 @@ def compute_valuation_metrics(df, params=None, roe_reports=None,
                  残差>0 市场给多（贵）、<0 给少（便宜）。
     - pb_adj_b_pct / pb_adj_pct / pr*_pct 等为各自序列的 expanding 历史位置(0~1)，
                  **越低越便宜**；起算日由 pct_start_date 控制（=文章口径 2012 起）。
+    - roe_step_b_pct  季报年化 ROE 台阶的历史位置(0~1)：面板读数 + 第二层右轴原始值(%)。
+    - roe_impl_pct    日频隐含 ROE 的历史位置(0~1)，面板读数用。
     """
     p = params or ValuationParams()
     if df is None or df.empty:
@@ -223,14 +266,16 @@ def compute_valuation_metrics(df, params=None, roe_reports=None,
     out["pr"] = out["pe_ttm"] / (out["roe_impl"] * 100.0)
 
     # ---- 盈利调节——v1 日频口径（旧口径，保留对照）：PB 对 日频隐含ROE 的滚动回归残差
-    out["pb_adj"] = map_residual(out["pb"], out["roe_impl"], p.map_window, p.pct_min_periods)
+    out["pb_adj"] = map_residual(out["pb"], out["roe_impl"], p.map_window,
+                                 p.reg_min_periods, quad=p.reg_quad)
 
     # ---- 盈利调节主口径（B 轨/季报ROE 台阶）----
     roe_step_b = step_roe_from_reports(out["date"], roe_reports, p.step_lag_days)
     out["roe_step_b"] = roe_step_b
     # 无季报时 B 轨缺席，主读数自动退化为 pb_adj（v1）
     if roe_reports:
-        out["pb_adj_b"] = map_residual(out["pb"], roe_step_b, p.map_window, p.pct_min_periods)
+        out["pb_adj_b"] = map_residual(out["pb"], roe_step_b, p.map_window,
+                                       p.reg_min_periods, quad=p.reg_quad)
 
     # 盈利调节市销率：PS = 总市值 / TTM营业收入；对称于盈利调节市净率
     if "total_mv" in out.columns and revenue_reports:
@@ -239,7 +284,7 @@ def compute_valuation_metrics(df, params=None, roe_reports=None,
         out["ps"] = (out["total_mv"] / revenue_ttm).where(revenue_ttm > 0)
         out["net_margin_impl"] = (out["ps"] / out["pe_ttm"]).where(out["pe_ttm"] > 0)
         out["ps_adj"] = map_residual(out["ps"], out["net_margin_impl"],
-                                     p.map_window, p.pct_min_periods)
+                                     p.map_window, p.reg_min_periods, quad=p.reg_quad)
 
     out["pr_b"] = out["pe_ttm"].where(out["pe_ttm"] > 0) / (roe_step_b.where(roe_step_b > 0) * 100.0)
     roe_avg = avg_roe_from_reports(roe_reports)
@@ -271,10 +316,14 @@ def compute_valuation_metrics(df, params=None, roe_reports=None,
     for col in ("pb", "pe_ttm", "pr", "pr_adj", "pr_b", "pb_adj"):
         src = out[col] if col != "pe_ttm" else out["pe_ttm"].where(out["pe_ttm"] > 0)
         out[f"{col}_pct"] = _pct(src)
+    out["roe_impl_pct"] = _pct(out["roe_impl"])
     if "pr_avg" in out.columns:
         out["pr_avg_pct"] = _pct(out["pr_avg"])
     if "pb_adj_b" in out.columns:
         out["pb_adj_b_pct"] = _pct(out["pb_adj_b"])
+    if "roe_step_b" in out.columns:
+        # 季报年化 ROE 台阶的历史位置：面板读数 + 第二层右轴原始值(%)
+        out["roe_step_b_pct"] = _pct(out["roe_step_b"])
     if "ps_adj" in out.columns:
         out["ps_adj_pct"] = _pct(out["ps_adj"])
     return out.reset_index(drop=True)
@@ -296,7 +345,7 @@ def latest_readings(metrics, payout=None) -> Dict:
     _put("close", "收盘")
     _put("pb", "市净率PB", "pb_pct")
     _put("pe_ttm", "市盈率PE_TTM", "pe_ttm_pct")
-    _put("roe_impl", "隐含ROE(pb/pe_ttm)")
+    _put("roe_impl", "隐含ROE(pb/pe_ttm)", "roe_impl_pct")
     _put("pr", "市赚率PR", "pr_pct")
     reads["pr"]["n"] = clean_value(last.get("n"))
     for key, label in (("pr_b", "市赚率PR(季报ROE口径)"), ("pr_avg", "市赚率PR(多年平均ROE口径)")):
@@ -310,6 +359,7 @@ def latest_readings(metrics, payout=None) -> Dict:
             _put(key, label, f"{key}_pct")
             if roe_key:
                 reads[key]["roe"] = clean_value(last.get(roe_key))
+                reads[key]["roe_pct"] = clean_value(last.get(f"{roe_key}_pct"))
     if "market_drift" in metrics.columns:
         reads["market_drift"] = {"label": "市场水位漂移(已扣减)",
                                  "value": clean_value(last.get("market_drift")), "pct": None}
@@ -331,7 +381,8 @@ def panel_rows(ctx: dict) -> List[Tuple[str, str, str]]:
     rows.append(("市盈率 PE_TTM", fmt_num(pe.get("value")),
                  f"历史位置 {fmt_pct(pe.get('pct'))}"))
     roe = g("roe_impl", {})
-    rows.append(("隐含ROE = PB/PE_TTM", fmt_pct(roe.get("value")), "年化，日频推导"))
+    rows.append(("隐含ROE = PB/PE_TTM", fmt_pct(roe.get("value")),
+                 f"年化，日频推导 · 历史位置 {fmt_pct(roe.get('pct'))}"))
     pr = g("pr", {})
     rows.append(("市赚率 PR = PE/ROE(%)", fmt_num(pr.get("value")),
                  f"越低越划算 · 历史位置 {fmt_pct(pr.get('pct'))}"))
@@ -362,7 +413,7 @@ def panel_rows(ctx: dict) -> List[Tuple[str, str, str]]:
         roe_v = d.get("roe")
         note = f"{fmt_pct(pos)} 位置 · 残差 {fmt_num(res, 4)} PB"
         if roe_v is not None:
-            note += f" · 盈利ROE {fmt_pct(roe_v)}"
+            note += f" · 盈利ROE {fmt_pct(roe_v)}（位置 {fmt_pct(d.get('roe_pct'))}）"
         rows.append((label, fmt_num(pos), note))
     md = g("market_drift")
     if md:

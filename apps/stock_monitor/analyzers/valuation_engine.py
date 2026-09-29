@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -34,15 +35,17 @@ DATA_START = get_path("valuation", "fetch_start",
                       get_path("valuation", "data_start", "20100101"))
 FQ = get_path("valuation", "fq", "qfq")
 DATA_START_VALID = 300
-PCT_BUY = 0.10
-PCT_SELL = 0.90
 LOOKAHEAD = 60
 # 信号规则（config.ini 驱动）：two_state=二态机（买入持有，连续同向归并成一笔）/ cross=旧口径
 SIGNAL_MODE = get_path("valuation", "signal_mode", "two_state").lower()
 BUY_THRESHOLD = float(get_path("valuation", "buy_threshold", "0.10"))
 SELL_THRESHOLD = float(get_path("valuation", "sell_threshold", "0.90"))
-# 个股阈值覆盖：{"000725": (0.05, 0.95), ...}
+# 个股阈值覆盖：{"000725": (0.05, 0.95), ...}；元组顺序为 (buy, sell)
 _DEFAULT_THRESHOLD = (BUY_THRESHOLD, SELL_THRESHOLD)
+# 信号函数的默认形参只是"无参直调"时的兜底：run_valuation 总会显式传 thresholds_for(code)。
+# 统一引用 _DEFAULT_THRESHOLD，避免再出现第二套（0.10/0.90）魔法阈值。
+DEFAULT_BUY = _DEFAULT_THRESHOLD[0]
+DEFAULT_SELL = _DEFAULT_THRESHOLD[1]
 
 
 def _parse_overrides() -> Dict[str, tuple]:
@@ -216,9 +219,91 @@ def run_valuation(code: str, start: Optional[str] = None) -> dict:
                         metrics=metrics)
 
 
+def compute_readings(code: str, need_ps: bool = False, force: bool = False) -> Optional[dict]:
+    """**轻量读数入口**（供选股器等批量场景复用）——只算读数，**不出图表/报告**。
+
+    与 `run_valuation` 的关系：同一条因子管线，但**跳过** 市场水位漂移、价格周期明细、
+    买卖信号、K线图数据、文本报告 —— 那些是「估值报告页」需要的，选股用不上且很贵。
+    （注：为**不扰动已稳定的 `run_valuation`**，此处刻意保留少量重复的管线代码。）
+
+    性能（hs300 实测）：
+      * `need_ps=False`（默认）→ **不拉营业收入** → 单股约 0.10s，全池 300 只约 31s
+      * `need_ps=True` → 需拉营业收入（akshare，约 4.9s/只，**未预热时很慢**）
+
+    缓存：按 `code + 当天日期` 存 `long_term_storage`（TTL 2 天）；
+    `need_ps=True` 而缓存里是"未含 PS"的 → 自动重算。
+    """
+    from ..core.cache_with_database import retrieve_long_term_data, store_long_term_data
+
+    today = datetime.now().strftime("%Y%m%d")
+    key = f"val_readings_{code.zfill(6)}_{today}"
+    if not force:
+        rec = retrieve_long_term_data(key)
+        if rec and rec.get("readings") and (not need_ps or rec.get("need_ps")):
+            return rec["readings"]
+
+    df = get_daily(code, start=DATA_START, fq=FQ)
+    if df.empty:
+        return None
+
+    def _try(fn, what):
+        try:
+            return fn()
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"{code} {what} 获取异常: {type(e).__name__}: {e}")
+            return None
+
+    roe_reports = _try(lambda: get_report_roe(code), "季报ROE")
+    payout = _try(lambda: get_payout_ratio(code), "分红率")
+    revenue_reports = _try(lambda: get_report_revenue(code), "营业收入") if need_ps else None
+
+    base = get_factor("valuation")
+    metrics = base.compute(df, roe_reports=roe_reports, revenue_reports=revenue_reports,
+                           market_level=None, payout_ratio=(payout or {}).get("payout"))
+    if len(metrics) < DATA_START_VALID:
+        logger.warning(f"{code} 数据不足（{len(metrics)} 行），读数缺席")
+        return None
+
+    # 并入非基础因子列（price_cycle / fusion）——与 run_valuation 同逻辑
+    for f in all_factors():
+        if f.is_base or not f.merge_cols:
+            continue
+        try:
+            sub = f.compute(metrics if f.name == "fusion" else df)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"{code} {f.name} 计算失败: {type(e).__name__}: {e}")
+            continue
+        if sub is not None and not sub.empty and set(f.merge_cols) <= set(sub.columns):
+            metrics = metrics.merge(sub[["date", *f.merge_cols]], on="date", how="left")
+
+    readings = base.latest(metrics, payout=payout)
+    for f in all_factors():
+        if f.is_base or not f.latest:
+            continue
+        try:
+            extra = f.latest(metrics) or {}
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"{code} {f.name}.latest 失败: {type(e).__name__}: {e}")
+            continue
+        for k, v in extra.items():
+            readings.setdefault(k, v)
+    for k in ("pb_adj_b", "pb_adj"):
+        if readings.get(k) is not None and k in metrics.columns:
+            res = metrics[k].iloc[-1]
+            readings[k]["residual"] = (None if pd.isna(res) else float(res))
+
+    try:
+        store_long_term_data(key, {"readings": readings, "need_ps": bool(need_ps),
+                                   "code": code, "as_of": str(readings.get("date", {}).get("value"))},
+                             "val_readings", expires_in_seconds=2 * 24 * 3600)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"{code} 读数缓存写入失败: {e}")
+    return readings
+
+
 # ---------------------------------------------------------------- 信号
 def _signal_events_hold(metrics: pd.DataFrame, col: str = "pb_adj_b_pct",
-                        buy: float = 0.06, sell: float = 0.94,
+                        buy: float = DEFAULT_BUY, sell: float = DEFAULT_SELL,
                         lookahead: int = LOOKAHEAD) -> List[Dict]:
     """二态机（买入持有）—— 作者"4 笔交易"口径的信号实现。
 
@@ -252,7 +337,7 @@ def _signal_events_hold(metrics: pd.DataFrame, col: str = "pb_adj_b_pct",
 
 
 def _signal_events(metrics: pd.DataFrame, col: str = "pb_adj_b_pct",
-                   buy: float = PCT_BUY, sell: float = PCT_SELL,
+                   buy: float = DEFAULT_BUY, sell: float = DEFAULT_SELL,
                    lookahead: int = LOOKAHEAD) -> List[Dict]:
     """cross 口径（多次触发标记）：每次"进入"极端区都记一次，供第一层图上全画。
 

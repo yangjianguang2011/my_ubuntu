@@ -1,19 +1,38 @@
 # 项目特定忽略
 .gitignore
 .vscode/
-.qwen
+.workbuddy-ai/
 run/
-docs/
-tests/
+
 # 敏感配置文件
 apps/config.ini
-apps/xueqiu/xueqiu_cookies*.txt
+**/xueqiu_cookies*.txt
+apps/stock_monitor/web_templates/index.html
+
+# —— 文档：docs/ 下根级「使用文档」入库；开发资料不入库 ——
+# 注意：不能整行忽略 docs/（父目录被忽略时子文件的 ! 放行无效）
+docs/dev/
+docs/**/ref_docs/
+docs/**/*.htm
+docs/**/*.html
+docs/**/*.jpg
+docs/**/*.jpeg
+docs/**/*.png
+docs/**/*.csv
+
+# —— 测试：只提交说明，测试脚本属开发验证（不入库） ——
+tests/test_*.py
+tests/__init__.py
+
+# —— 运行产物 / 私有配置 ——
+apps/stock_monitor/reports/
+apps/stock_monitor/stocks.json
+apps/stock_monitor/reasonix.toml
+apps/stock_monitor/scripts/prices_history.txt
 
 # stockdb 本地仓库（二进制 + 数据，不入库）
 apps/stockdb/
 
-# 私有域名相关
-apps/stock_monitor/web_templates/index.html
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -227,15 +246,5 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
-
-# 运行时/本机产物（不入库）
-.workbuddy-ai/
-logs/
-apps/stock_monitor/reports/
-apps/stock_monitor/scripts/prices_history.txt
-apps/stock_monitor/reasonix.toml
-apps/stock_monitor/stocks.json
-apps/news/output/
-
 
 

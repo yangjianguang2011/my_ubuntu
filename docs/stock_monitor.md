@@ -10,8 +10,10 @@
 
 - `start_app.py`：启动入口，负责启动 Web 服务、股票监控主循环和缓存预热线程。
 - `core/`：核心运行时模块，包含配置管理、监控逻辑、通知、Web API 和缓存。
-- `data_fetchers/`：数据获取模块，负责从多个外部数据源拉取股票、基金、指数、行业、分析师数据。
-- `analyzers/`：分析模块，包含回测、趋势分析、资金轮动、LPPL 等策略分析工具。
+- `data_fetchers/`：数据获取模块，负责从多个外部数据源拉取股票、基金、指数、分析师数据
+  （行业页已下线；指数成分股统一走 `pool_data_fetcher`）。
+- `analyzers/`：分析模块 —— 估值因子/价格周期/融合、市场温度、趋势交易分析，
+  以及**策略选股**（条件注册表：技术面 × 估值面自由组合）。
 - `scripts/`：运维与辅助脚本，如消息推送、价格采集、报表生成、数据库查看等。
 
 ---
@@ -23,7 +25,7 @@
 1. 读取基础配置并初始化日志。
 2. 启动 `Flask` Web 服务，监听 `0.0.0.0:5001`。
 3. 启动 `StockMonitor` 实例，进入股票监控循环。
-4. 启动缓存预热线程，定期预加载分析师、行业、指数和基金数据。
+4. 启动缓存预热线程，定期预加载分析师、指数和基金数据。
 5. 使用 `atexit` 注册清理函数，退出时同步配置管理器状态到文件。
 
 ---
@@ -129,10 +131,12 @@ Web 应用静态文件和模板目录：
 缓存类型与默认时长：
 
 - `stock`：3 分钟
-- `industry`：24 小时
 - `analyst`：24 小时
 - `index`：24 小时
 - `fund`：24 小时
+
+⚠️ `HybridCache` **优先命中进程内内存层**：手工删 SQLite 行不会清内存，
+复测需**换新进程**（或重启容器）。
 
 ---
 
@@ -142,7 +146,7 @@ Web 应用静态文件和模板目录：
 
 ### 4.1 核心文件
 
-- `stock_data_fetcher.py`：实时股票数据，使用 `easyquotation` + `akshare`。
+- `stock_data_fetcher.py`：实时股票数据（`easyquotation`）；**历史日K 走 `stockdb_data_fetcher`**（A股前复权）/ akshare（港股兜底）。
 - `fund_data_fetcher.py`：基金数据。
 - `index_data_fetcher.py`：指数数据。
 - `analyst_data_fetcher.py`：分析师相关数据（口径为**年度排行**，详见上文说明）。
@@ -150,13 +154,12 @@ Web 应用静态文件和模板目录：
 ### 4.2 `stock_data_fetcher.py` 实现要点
 
 - `determine_market_type(stock_code)`：根据代码长度判断是否为港股。
-- A 股使用 `easyquotation.use("sina")` 获取行情；港股使用 `easyquotation.use("hkquote")`。
-- 支持历史行情拉取，尝试多种数据源：
-  - `akshare.stock_zh_a_hist`
-  - `akshare.stock_zh_a_daily`
-  - `akshare.stock_zh_a_hist_tx`
-  - `easyquotation` daykline
-- 使用缓存避免频繁重复请求。
+- 实时行情：A 股用 `easyquotation.use("sina")`；港股用 `easyquotation.use("hkquote")`。
+  ⚠️ easyquotation 命名反直觉：`sina.turnover` 是**成交量(股)**、`sina.volume` 是**成交额(元)**；
+  港股 `hkquote.volume_2` 是成交量、`amountYuan` 是成交额。
+- 历史日K：**统一走 `stockdb_data_fetcher`**（本地库，A 股取前复权 `qfq`），
+  大批量取数用 `get_raw(codes, ...)` **一次批量**；**港股 stockdb 取不到，必须回退 akshare**。
+- 使用 `cache.db` 缓存避免频繁重复请求。
 
 ### 4.3 现有文档
 
@@ -187,7 +190,7 @@ Web 应用静态文件和模板目录：
 
 `apps/config.ini.example` 中的 `[stock_monitor]` 段：
 
-- `database_dir`、`settings_file`、`stocks_file`、`cache_dir`
+- `database_dir`、`settings_file`、`stocks_file`（`cache_dir` 已删除，缓存统一入 `database_dir/cache.db`）
 - 缓存时长：`stock_cache_timeout` / `default_cache_timeout` /
   `analyst_cache_timeout` / `index_cache_timeout` / `fund_cache_timeout`
 
@@ -248,11 +251,15 @@ python start_app.py
 | `data_fetchers/pool_data_fetcher.py` | 指数成分股（akshare 双源 + cache.db） |
 | `data_fetchers/fundamental_data_fetcher.py` | 财报 ROE / 分红 / 营收（cache.db 缓存） |
 | `data_fetchers/analyst_data_fetcher.py` | 分析师数据获取 |
-| `analyzers/picker_rules.py` | 选股指标 + 规则引擎（纯计算） |
-| `analyzers/picker_runner.py` | 选股批量编排 + 快照（后台单例运行器） |
+| `core/utils.py` | 公共助手（响应封装、参数校验、代码归一） |
+| `analyzers/ma_indicators.py` | 共享均线/斜率指标层（选股与趋势分析共用） |
+| `analyzers/conditions.py` | **选股条件注册表**（技术面 6 + 估值面 7） |
+| `analyzers/picker_rules.py` | 选股指标 + 原 4 条件规则引擎（纯计算） |
+| `analyzers/picker_runner.py` | 选股分层编排（技术粗筛→估值精筛）+ 快照 |
 | `analyzers/picker_web.py` | 选股 REST API（`/api/picker/*`） |
-| `web_templates/` | 前端页面模板 |
-| `web_static/` | 前端静态资源 |
+| `analyzers/valuation_engine.py` | 估值引擎（`run_valuation` / 轻量读数 `compute_readings`） |
+| `web_templates/` | 前端页面模板（`index.html` 为私有值，不入库） |
+| `web_static/` | 前端静态资源（`vendor/` 为本地托管的 echarts/jquery/tabulator） |
 
 ---
 
@@ -262,8 +269,10 @@ python start_app.py
 - `StockMonitor` 以 `stock_code` 长度判断市场类型，存在特殊代码误判风险。
 - 通知依赖外部 `your-message-server` 推送服务，外部可用性影响报警稳定性。
 - 缓存策略默认以时长为主，未对实时行情波动时延进行更细粒度控制。
-- 估值报告的「股票池」目前只覆盖沪深300/中证500；stockdb 本地库支持全 A 股，
-  后续可考虑放开（见 `docs/` 与 `MEMORY.md` 的 backlog）。
+- 估值/选股的「股票池」目前只覆盖沪深300/中证500；stockdb 本地库支持全 A 股，
+  后续可考虑放开（backlog 见 `docs/dev/MEMORY.md`）。
+- **部署红线**：同步代码到 NAS 时必须**排除** `core/notification.py`（推送凭据）
+  与 `web_templates/index.html`（私有域名链接）——这两个文件在 NAS 上有私有值。
 
 ---
 
@@ -271,7 +280,9 @@ python start_app.py
 
 - `apps/stock_monitor/data_fetchers/README.md`
 - `apps/stock_monitor/analyzers/README.md`
+- `docs/NAS部署说明.md`
+- `docs/爬虫与采集模块.md`
 
 ---
 
-文档生成于 2026-06-13；最近更新 2026-09-24（缓存统一入 `cache.db`、选股器并入 `analyzers/`）。
+文档生成于 2026-06-13；最近更新 2026-09-29（选股条件注册表、stockdb 数据源、部署红线）。

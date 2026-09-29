@@ -19,28 +19,129 @@
             : { method: 'POST', body: JSON.stringify(body) });
     }
 
-    function numVal(id, def) {
-        var v = parseFloat($(id).value);
-        return isNaN(v) ? def : v;
+    // ---- 条件目录（后端 /api/picker/conditions 下发；前端不写死任何条件）----
+    var catalog = null;   // {global_params, groups:[{group, conditions:[...]}]}
+
+    function escAttr(s) {
+        return String(s === undefined || s === null ? '' : s)
+            .replace(/&/g, '&amp;').replace(/"/g, '&quot;')
+            .replace(/</g, '&lt;').replace(/>/g, '&gt;');
     }
 
-    function collectParams() {
-        var lookback = numVal('pk-cross-lookback', 120);
-        return {
-            ma_fast: numVal('pk-ma-fast', 20),
-            ma_mid: numVal('pk-ma-mid', 60),
-            ma_slow: numVal('pk-ma-slow', 200),
-            cross_lookback_bars: lookback,
-            cross_max_bars_since: lookback,
-            pullback_max_dist_pct: numVal('pk-pullhigh', 5.0),
-            pullback_low_touch_above_pct: numVal('pk-touch-above', 3.0),
-            pullback_low_touch_below_pct: numVal('pk-touch-below', 1.5),
-            use_volume_shrink: !!$('pk-volume').checked,
-        };
+    function paramInput(condId, name, spec) {
+        var id = 'pkp-' + condId + '-' + name;
+        if (spec.type === 'bool') {
+            return '<label style="display:flex;align-items:center;gap:3px;">'
+                + '<input type="checkbox" id="' + id + '" data-param="' + escAttr(name) + '"'
+                + (spec.default ? ' checked' : '') + '> ' + escAttr(spec.label) + '</label>';
+        }
+        if (spec.type === 'select') {
+            var opts = (spec.options || []).map(function (o) {
+                return '<option value="' + escAttr(o) + '"'
+                    + (o === spec.default ? ' selected' : '') + '>' + escAttr(o) + '</option>';
+            }).join('');
+            return '<label style="display:flex;flex-direction:column;font-size:12px;color:#666;">'
+                + escAttr(spec.label) + '<select id="' + id + '" data-param="' + escAttr(name)
+                + '" style="margin-top:2px;padding:3px;">' + opts + '</select></label>';
+        }
+        var step = spec.type === 'int' ? '1' : 'any';
+        return '<label style="display:flex;flex-direction:column;font-size:12px;color:#666;">'
+            + escAttr(spec.label) + '<input type="number" id="' + id + '" data-param="'
+            + escAttr(name) + '" value="' + escAttr(spec.default) + '" step="' + step
+            + '" style="margin-top:2px;width:86px;padding:3px;"></label>';
+    }
+
+    function renderCatalog() {
+        // 全局参数（均线体系）
+        var gp = catalog.global_params || {};
+        $('pk-global-params').innerHTML = Object.keys(gp).map(function (k) {
+            var s = gp[k];
+            return '<label style="display:flex;flex-direction:column;font-size:13px;color:#666;">'
+                + escAttr(s.label) + '<input type="number" id="pkg-' + escAttr(k)
+                + '" data-gparam="' + escAttr(k) + '" value="' + escAttr(s.default)
+                + '" style="margin-top:4px;width:80px;padding:6px;"></label>';
+        }).join('');
+
+        // 条件：按分组渲染到**各自容器**（组标题已在 HTML 中，便于分区更明显）
+        (catalog.groups || []).forEach(function (g) {
+            var isVal = String(g.group).indexOf('估值') >= 0;
+            var target = isVal ? $('pk-conditions-val') : $('pk-conditions-tech');
+            if (!target) return;
+            var color = isVal ? '#8e44ad' : '#1f7a33';
+            target.innerHTML = (g.conditions || []).map(function (c) {
+                COND_LABELS[c.id] = c.label;
+                var ps = Object.keys(c.params || {}).map(function (pn) {
+                    return paramInput(c.id, pn, c.params[pn]);
+                }).join('');
+                return '<div data-condbox="' + escAttr(c.id) + '" style="border:1px solid '
+                    + (isVal ? '#e8ddf0' : '#dbe8db')
+                    + ';border-radius:5px;padding:7px 10px;background:#fff;min-width:240px;">'
+                    + '<label style="display:flex;align-items:center;gap:5px;font-size:13px;">'
+                    + '<input type="checkbox" data-cond="' + escAttr(c.id) + '"'
+                    + (c.default_on ? ' checked' : '') + '>'
+                    + '<b style="color:' + color + ';">' + escAttr(c.label) + '</b></label>'
+                    + (c.note ? '<div style="font-size:11px;color:#999;margin:2px 0 4px;">'
+                                + escAttr(c.note) + '</div>' : '')
+                    + '<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end;">'
+                    + ps + '</div></div>';
+            }).join('');
+        });
+    }
+
+    function loadCatalog() {
+        return apiCall('/api/picker/conditions').then(function (resp) {
+            catalog = (resp && resp.data) || null;
+            if (catalog) renderCatalog();
+        }).catch(function (e) { setBanner('条件清单加载失败：' + e.message); });
+    }
+
+    function readParams(box, attr) {
+        var out = {};
+        (box.querySelectorAll('[' + attr + ']') || []).forEach(function (el) {
+            var name = el.getAttribute(attr);
+            if (el.type === 'checkbox') out[name] = !!el.checked;
+            else if (el.type === 'number') {
+                var v = parseFloat(el.value);
+                if (!isNaN(v)) out[name] = v;
+            } else out[name] = el.value;
+        });
+        return out;
+    }
+
+    function collectPayload() {
+        var globalParams = {};
+        $('pk-global-params').querySelectorAll('[data-gparam]').forEach(function (el) {
+            var v = parseFloat(el.value);
+            if (!isNaN(v)) globalParams[el.getAttribute('data-gparam')] = v;
+        });
+
+        var conditions = {};
+        var boxes = document.querySelectorAll('#pk-conditions-tech [data-cond], #pk-conditions-val [data-cond]');
+        Array.prototype.forEach.call(boxes, function (cb) {
+            var cid = cb.getAttribute('data-cond');
+            var box = cb.closest('[data-condbox]');
+            conditions[cid] = {
+                enabled: !!cb.checked,
+                params: box ? readParams(box, 'data-param') : {},
+            };
+        });
+        return { pool: $('pk-pool').value, global_params: globalParams, conditions: conditions };
     }
 
     function setBanner(text) { $('pk-status').textContent = text; }
     function setBar(pct) { $('pk-bar').style.width = (Math.max(0, Math.min(100, pct))) + '%'; }
+    // 阶段统计：技术 N → 估值 M → 命中 K
+    function setSummary(s) {
+        var el = $('pk-summary');
+        if (!el) return;
+        s = s || {};
+        if (!s.tech_passed && !s.val_scanned) { el.textContent = ''; return; }
+        var parts = [];
+        if (s.tech_passed) parts.push('技术 ' + s.tech_passed);
+        if (s.val_scanned) parts.push('估值 ' + s.val_scanned);
+        parts.push('命中 ' + ((s.matched || []).length));
+        el.textContent = parts.join('  →  ');
+    }
     function setBusy(busy) {
         $('pk-run').disabled = busy;
         $('pk-stop').disabled = !busy;
@@ -49,11 +150,10 @@
 
     function runScan() {
         setBusy(true); setBar(1); setBanner('正在启动扫描…');
-        post('/api/picker/run', {
-            pool: $('pk-pool').value,
-            params: collectParams(),
-            force: !!$('pk-force').checked,
-        }).then(function () { startPoll(); })
+        finished = false; polling = false;   // 新一轮扫描：解除"已完成"锁定
+        var payload = collectPayload();
+        payload.force = !!$('pk-force').checked;
+        post('/api/picker/run', payload).then(function () { startPoll(); })
           .catch(function (e) { setBanner('启动失败：' + e.message); setBusy(false); });
     }
 
@@ -70,27 +170,42 @@
         if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
     }
 
+    // 轮询防重入 + 完成锁定：
+    //  * `polling`  —— 上一次请求未返回前不发新请求（避免慢响应乱序）
+    //  * `finished` —— 一旦收到 running=false 就置位；此后**丢弃迟到的响应**，
+    //                  否则旧响应会把「已完成」覆盖回「扫描中」→ 按钮永久 busy。
+    var polling = false;
+    var finished = false;
+
     function poll() {
+        if (polling || finished) return;
+        polling = true;
         apiCall('/api/picker/status').then(function (resp) {
+            if (finished) return;               // 已完成：丢弃迟到响应
             var s = resp.data || resp;
             state.running = s.running;
             state.matched = s.matched || [];
             state.partial = s.partial || [];
             state.message = s.message || '';
-            setBar(s.progress_pct || (s.running ? 2 : 0));
-            setBanner((state.message || '') + (state.running ? '（扫描中…）' : ''));
+            // 进度条用**当前阶段**的百分比（后端 progress_pct 已按 stage_total 计算）
+            setBar(s.running ? (s.progress_pct || 2) : 100);
+            var prefix = (s.stage && s.stage !== '完成') ? '[' + s.stage + '] ' : '';
+            setBanner(prefix + (state.message || '') + (s.running ? '（扫描中…）' : ''));
+            setSummary(s);
             if (s.running) {
                 setBusy(true);
             } else {
+                finished = true;
                 stopPoll(); setBusy(false);
                 if (s.matched && s.matched.length) setBanner(state.message + '，完整命中 ' + s.matched.length + ' 只');
                 render();
                 loadHistTab(); // 保存了本次快照
             }
         }).catch(function (e) {
+            if (finished) return;
             setBanner('进度获取失败：' + e.message);
             stopPoll(); setBusy(false);
-        });
+        }).then(function () { polling = false; });
     }
 
     function render() {
@@ -206,6 +321,51 @@
     var histDetailCache = {};   // run_id -> {matched:[...]} 
     var COLS_HIST_DETAIL = [['code', '代码'], ['name', '名称'], ['price', '现价'],
                             ['chg', '当日'], ['dist', '距快线'], ['r', '命中明细']];
+
+    // 把快照里存的策略参数拼成一行可读文本（旧快照可能没有 params，做了兜底）
+    var COND_LABELS = {};   // cid -> 条件显示名（由 catalog 填充）
+
+    function fmtParams(p) {
+        p = p || {};
+        var parts = [];
+        if (p.ma_fast != null) parts.push('快线 MA' + p.ma_fast);
+        if (p.ma_mid != null) parts.push('中线 MA' + p.ma_mid);
+        if (p.ma_slow != null) parts.push('慢线 MA' + p.ma_slow);
+        if (p.cross_lookback_bars != null) parts.push('金叉回溯 ' + p.cross_lookback_bars + ' 根');
+        if (p.pullback_min_dist_pct != null && p.pullback_max_dist_pct != null) {
+            parts.push('回调带 ' + p.pullback_min_dist_pct + '% ~ +' + p.pullback_max_dist_pct + '%');
+        }
+        if (p.pullback_low_touch_below_pct != null && p.pullback_low_touch_above_pct != null) {
+            parts.push('回踩带 -' + p.pullback_low_touch_below_pct + '% ~ +' + p.pullback_low_touch_above_pct + '%');
+        }
+        if (p.pullback_confirm_window != null) parts.push('回踩窗口 ' + p.pullback_confirm_window + ' 根');
+        parts.push('缩量软条件 ' + (p.use_volume_shrink ? '开' : '关'));
+        return parts.join(' · ');
+    }
+
+    // 新格式快照：全局参数 + 各条件及其参数
+    function fmtConditions(s) {
+        var gp = s.global_params || {};
+        var parts = [];
+        if (gp.ma_fast != null) parts.push('快线 MA' + gp.ma_fast);
+        if (gp.ma_mid != null) parts.push('中线 MA' + gp.ma_mid);
+        if (gp.ma_slow != null) parts.push('慢线 MA' + gp.ma_slow);
+        var cs = s.conditions || {};
+        Object.keys(cs).forEach(function (cid) {
+            var label = COND_LABELS[cid] || cid;
+            var p = (cs[cid] || {}).params || {};
+            var kv = Object.keys(p).map(function (k) { return k + '=' + p[k]; }).join(', ');
+            parts.push(label + (kv ? '（' + kv + '）' : ''));
+        });
+        return parts.join(' · ');
+    }
+
+    function fmtSnapshotPlan(s) {
+        // 新格式优先；旧快照（只有 params）走 fmtParams
+        if (s && s.conditions && Object.keys(s.conditions).length) return fmtConditions(s);
+        return fmtParams((s || {}).params);
+    }
+
     function renderHistRowDetail(s, matched) {
         var rowsHtml = matched.map(function (m) {
             var dist = metric(m.reasons, 'dist_to_ma_fast_pct');
@@ -222,6 +382,11 @@
         }).join('');
         return '<tr class="pk-exprow" data-run-id="' + esc(s.run_id) + '">'
             + '<td colspan="' + COLS_HIST.length + '" style="background:#fafcff;padding:6px 10px;">'
+            + '<div style="margin-bottom:6px;color:#555;font-size:12px;background:#fff;'
+            + 'border:1px solid #eef0f3;border-radius:4px;padding:5px 8px;">'
+            + '<b style="color:#1890ff;">当时条件</b>：' + esc(fmtSnapshotPlan(s))
+            + (s.failed ? ' <span style="color:#c0392b;">· 取数失败 ' + s.failed + ' 只</span>' : '')
+            + '</div>'
             + (matched.length
                 ? '<div style="margin-bottom:4px;color:#666;font-size:12px;">完整命中 ' + matched.length + ' 只：</div>'
                   + '<table class="pk-table" style="width:100%;border-collapse:collapse;">'
@@ -238,31 +403,57 @@
         var root = tr.parentNode;
         if (root !== $('pk-tbody')) return;
         var runId = tr.getAttribute('data-run-id');
-        // 查找同运行行是否已有一条展开行
-        var existing = null;
-        for (var i = tr.rowIndex + 1; i < root.rows.length; i++) {
+
+        // ⚠️ 必须用**段内索引**（tbody.rows 的下标）定位与删除：
+        // `rowIndex` 是**表级**索引（含 thead），与 `rows[i]` / `deleteRow(i)` 的段级语义不一致，
+        // 混用会「扫描错位 + 删错行」（表现为再次点击时记录少一条）。
+        var selfIdx = Array.prototype.indexOf.call(root.rows, tr);
+        var existingIdx = -1;
+        for (var i = selfIdx + 1; i < root.rows.length; i++) {
             var r = root.rows[i];
-            if (String(r.className || '').indexOf('pk-exprow') >= 0 && r.getAttribute('data-run-id') === runId) {
-                existing = r; break;
+            if (String(r.className || '').indexOf('pk-exprow') >= 0
+                && r.getAttribute('data-run-id') === runId) {
+                existingIdx = i; break;
             }
         }
-        if (existing) { setHistArrow(tr, false); root.deleteRow(existing.rowIndex); return; }
-        var s = null;
-        (snapLoadedLast || []).forEach(function (x) { if (x.run_id === runId) s = x; });
+        if (existingIdx >= 0) {
+            setHistArrow(tr, false);
+            root.deleteRow(existingIdx);
+            return;
+        }
         setHistArrow(tr, true);
         if (!histDetailCache[runId]) {
             apiCall('/api/picker/snapshots/' + encodeURIComponent(runId)).then(function (resp) {
                 var detail = resp.data || resp;
                 histDetailCache[runId] = (detail && detail.matched) || [];
-                appendHistDetail(s, histDetailCache[runId]);
-            }).catch(function () { appendHistDetail(s, []); });
+                appendHistDetail(runId, histDetailCache[runId]);
+            }).catch(function () { appendHistDetail(runId, []); });
         } else {
-            appendHistDetail(s, histDetailCache[runId]);
+            appendHistDetail(runId, histDetailCache[runId]);
         }
     }
-    function appendHistDetail(s, matched) {
+
+    // 按 run_id 找回“运行行”（排除展开行本身）
+    function findHistRow(runId) {
+        var tbody = $('pk-tbody');
+        for (var i = 0; i < tbody.rows.length; i++) {
+            var r = tbody.rows[i];
+            if (r.getAttribute('data-run-id') === runId
+                && String(r.className || '').indexOf('pk-exprow') < 0) {
+                return r;
+            }
+        }
+        return null;
+    }
+
+    // 展开行插在**该运行行的正下方**（原实现 append 到表尾，会跑到列表最底部）
+    function appendHistDetail(runId, matched) {
+        var tr = findHistRow(runId);
+        if (!tr) return;
+        var s = null;
+        (snapLoadedLast || []).forEach(function (x) { if (x.run_id === runId) s = x; });
         if (!s) return;
-        $('pk-tbody').insertAdjacentHTML('beforeend', renderHistRowDetail(s, matched));
+        tr.insertAdjacentHTML('afterend', renderHistRowDetail(s, matched));
     }
 
     function renderHist() {
@@ -321,6 +512,7 @@
         inited = true;
         bind();
         switchTab('hit');
+        loadCatalog();          // 条件清单（动态表单）
         apiCall('/api/picker/status').then(function (resp) {
             var s = resp.data || resp;
             state.running = s.running;

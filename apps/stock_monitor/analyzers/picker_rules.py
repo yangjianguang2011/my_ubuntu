@@ -2,15 +2,14 @@
 """
 选股规则引擎 —— 「长周期均线趋势 + 回调买点」。
 
-由原 `stock_picker/indicators.py` + `stock_picker/rules.py` 合并而来：
 **纯计算，无 IO、无 Web 依赖**（数据获取在 `picker_runner.py`）。
 
 结构：
-  * 指标层 —— records/DataFrame 规整、MA、金叉、乖离、斜率
+  * 指标层 —— 已抽到共享模块 `analyzers/ma_indicators.py`（与「趋势分析」共用）
   * 规则层 —— `Params` 参数 + `evaluate_*` 纯函数，统一返回 `{passed, note, metrics}`；
     `evaluate_all` 串联必选规则得出最终结果
 
-默认参数体现"趋势中回调买点"语义：A 多头结构 / B 金叉二次确认 / C 回调买点 为必选，
+默认参数体现“趋势中回调买点”语义：A 多头结构 / B 金叉二次确认 / C 回调买点 为必选，
 量能缩量为软条件（默认关）。
 """
 from __future__ import annotations
@@ -20,126 +19,13 @@ from typing import Dict, List, Optional
 
 import pandas as pd
 
-
-# =========================================================================== #
-# 指标层
-# =========================================================================== #
-def records_to_frame(records: List[dict]) -> pd.DataFrame:
-    """把历史 K 线 records（含 date/open/high/low/close/volume 等）转成按 date 升序的 DataFrame。
-
-    数据源返回的列可能同时存在中/英文或缺失，这里只取我们关心的列做规整：
-    - date: 统一成 %Y-%m-%d 字符串
-    - open/high/low/close 统一 float
-    - volume 统一 float（部分源为字符串或为 0）
-    """
-    if not records:
-        return pd.DataFrame()
-
-    df = pd.DataFrame(records)
-    # 列名别名归一
-    rename = {
-        "trade_date": "date",
-        "日期": "date",
-        "开盘": "open",
-        "最高": "high",
-        "最低": "low",
-        "收盘": "close",
-        "成交量": "volume",
-        "vol": "volume",
-    }
-    df.rename(columns={k: v for k, v in rename.items() if k in df.columns}, inplace=True)
-
-    keep = [c for c in ("date", "open", "high", "low", "close", "volume") if c in df.columns]
-    df = df[keep]
-
-    if "date" in df.columns:
-        df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
-
-    numeric_cols = [c for c in ("open", "high", "low", "close", "volume") if c in df.columns]
-    for col in numeric_cols:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    # 去重 + 排序，取最后保留 date 非空行
-    if "date" in df.columns:
-        df = (df.dropna(subset=["date"])
-                .drop_duplicates(subset=["date"], keep="last")
-                .sort_values("date"))
-    return df.reset_index(drop=True)
-
-
-def add_ma(df: pd.DataFrame, windows: List[int]) -> pd.DataFrame:
-    """对 close 追加 ma_{window} 列。窗口足够时用 rolling，不足的行置 NaN。"""
-    if df.empty or "close" not in df.columns:
-        return df
-    out = df.copy()
-    for w in windows:
-        out[f"ma{w}"] = out["close"].rolling(window=w, min_periods=w).mean()
-    return out
-
-
-def detect_ma_cross_up(
-    df: pd.DataFrame, fast_label: str, slow_label: str, lookback_days: int
-) -> Optional[dict]:
-    """检测"快均线上穿慢均线"的金叉。
-
-    返回最近一次 fast 由 <=slow 变为 >slow 的信息：
-        {'cross_date': 'YYYY-MM-DD', 'cross_bars_ago': int}  # 距今多少根K线(0=今日金叉)
-    若 lookback_days 内没有发生返回 None。
-    用法：ma60 上穿 ma200 => fast_label='ma60', slow_label='ma200'。
-    只保留两线均有效的行——只有两侧都有值才谈得上相对位置（避免 ma200 刚起步的假交叉）。
-    """
-    if df.empty or fast_label not in df.columns or slow_label not in df.columns:
-        return None
-    valid = df[fast_label].notna() & df[slow_label].notna()
-    whole = df[valid].reset_index(drop=True)
-    if len(whole) < 2:
-        return None
-
-    above = whole[fast_label] > whole[slow_label]
-    last_cross_row = None
-    for i in range(1, len(whole)):
-        if (not above.iloc[i - 1]) and above.iloc[i]:
-            last_cross_row = i  # 循环结束后保留最近一次
-    if last_cross_row is None:
-        return None
-
-    bars_to_end = int(len(whole) - 1 - last_cross_row)
-    if bars_to_end > lookback_days:
-        return None
-    return {
-        "cross_date": str(whole.iloc[last_cross_row].get("date")),
-        "cross_bars_ago": bars_to_end,
-    }
-
-
-def dist_to_ma(df: pd.DataFrame, ma_label: str) -> Optional[float]:
-    """最新 close 相对 ma 的乖离率：(close - ma)/ma * 100，保留 2 位。无有效值返回 None。"""
-    if df.empty or "close" not in df.columns or ma_label not in df.columns:
-        return None
-    last = df.iloc[-1]
-    if pd.isna(last[ma_label]) or pd.isna(last.get("close")):
-        return None
-    ma = float(last[ma_label])
-    if ma == 0:
-        return None
-    return round((float(last["close"]) - ma) / ma * 100, 2)
-
-
-def slope_pct(df: pd.DataFrame, col: str, window: int) -> Optional[float]:
-    """最近 window 根内某均线/收盘价的斜率(以百分比计)：用首尾值变化率，避免线性回归开销。
-
-    用于约束"MA20 仍向上"。返回正值表示上行。
-    """
-    if df.empty or col not in df.columns:
-        return None
-    vals = pd.to_numeric(df[col], errors="coerce").dropna()
-    if len(vals) < window:
-        return None
-    seg = vals.tail(window)
-    base = float(seg.iloc[0])
-    if base == 0:
-        return None
-    return round((float(seg.iloc[-1]) - base) / base * 100, 3)
+from .ma_indicators import (
+    add_ma,
+    detect_ma_cross_up,
+    dist_to_ma,
+    records_to_frame,
+    slope_pct,
+)
 
 
 # =========================================================================== #
@@ -157,6 +43,8 @@ class Params:
     min_price_above_slow_ratio: float = 0.02   # 价格至少高于慢线 2%
     fast_slope_min_pct: float = 0.0            # 快线最近 window 斜率下限
     structure_slope_window: int = 10
+    # 并入原「均线多头排列」：快线需高于慢线至少该百分比（0 = 不要求）
+    min_fast_slow_gap_pct: float = 0.0
     # 必选：金叉二次确认（B）
     require_golden_cross: bool = True
     cross_lookback_bars: int = 120        # 在多少根K线内发生过 ma_mid 上穿 ma_slow
@@ -207,6 +95,7 @@ _RANGES = {
     "min_price_above_slow_ratio": (-100.0, 100.0),
     "fast_slope_min_pct": (-100.0, 100.0),
     "structure_slope_window": (2, 250),
+    "min_fast_slow_gap_pct": (0.0, 100.0),
     "cross_lookback_bars": (0, 1000),
     "cross_min_bars_since": (0, 1000),
     "cross_max_bars_since": (0, 1000),
