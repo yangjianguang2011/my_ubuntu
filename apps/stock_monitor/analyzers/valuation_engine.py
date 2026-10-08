@@ -77,6 +77,63 @@ MARKET_POOL = get_path("valuation", "market_level_pool", "hs300")
 # 温度门控参考指数（sh/sz/cyb → MARKET_INDICES）
 TEMP_INDEX_KEY = get_path("valuation", "temp_index", "sh").lower()
 
+# ---- 买点门控：多因子「主信号 + 门控」架构 ----
+# 主信号：sig_col（pb_adj_b_pct / fusion_pct）≤ buy_threshold
+# 门控：**只作用于"买"**，每个都是"必须通过"的与条件；缺数据时 fail-open（放行）
+#   roe_quality    盈利质量：roe_step_b_pct ≥ gate_roe_quality_min
+#                  → 排除"盈利中枢下移"（老凤祥型：便宜是因为东西变了，不是跌过头）
+#   price_position 价格位置：price_cycle ≤ gate_price_position_max
+#                  → 排除"价格已在高位"（接飞刀）
+#
+# ⚠ 默认**空 = 不启用**。消融实测（2026-10-02，hs300 全池 298 只，2012~2026，
+#   脚本 scripts/valuation_eval_gates.py）：
+#     roe_quality    回撤改善 +3.2pp，但平均超额 -28.9pp、持仓 -5.0pp  → 不划算
+#     price_position 回撤改善 +0.7pp，平均超额  -1.8pp                 → 不划算
+#     两者都开       回撤改善 +3.8pp，平均超额 -31.3pp                 → 不划算
+#   即：门控确实能小幅降回撤，但收益代价大得多。**留作可开关的实验能力**，
+#   等找到更有效的因子再逐项消融后启用（配置项 buy_gates 逗号分隔即可打开）。
+BUY_GATES = [g.strip() for g in
+             str(get_path("valuation", "buy_gates", "")).split(",")
+             if g.strip()]
+GATE_ROE_QUALITY_MIN = float(get_path("valuation", "gate_roe_quality_min", "0.30"))
+GATE_PRICE_POSITION_MAX = float(get_path("valuation", "gate_price_position_max", "0.60"))
+
+# 反转体系（月线反转 / 三线红 / 卖点）是否画进估值报告（默认开；关掉则报告不含该层）
+TBS_ENABLED = get_path("valuation", "tbs_enabled", "true").lower() in ("1", "true", "yes")
+
+# 门控元信息：key → (显示名, 阈值, 比较符, 说明)；供报告/前端展示
+GATE_META = {
+    "roe_quality": ("盈利质量", GATE_ROE_QUALITY_MIN, "≥",
+                    "季报年化ROE的历史位置——过低说明盈利中枢下移（“东西变了”），不是“跌过头”"),
+    "price_position": ("价格位置", GATE_PRICE_POSITION_MAX, "≤",
+                       "价格周期位置（均线偏离/z/距高点/动量/RSI/波动 6 项等权）——过高说明价格已在高位"),
+}
+
+
+def _gate_mask(metrics: pd.DataFrame, gates: Optional[List[str]] = None):
+    """按启用的门控算「买点是否放行」的逐日掩码 → `(mask, detail)`。
+
+    **缺数据一律 fail-open（放行）**：门控只在数据可得时才有话语权。否则早期历史
+    （季报/价格周期预热期）会被整段拦掉，且与"不开门控"的消融对比失去可比性。
+    """
+    n = len(metrics)
+    mask = np.ones(n, dtype=bool)
+    detail: Dict = {}
+    for g in (BUY_GATES if gates is None else gates):
+        col = {"roe_quality": "roe_step_b_pct", "price_position": "price_cycle"}.get(g)
+        if not col or col not in metrics.columns:
+            continue
+        s = pd.to_numeric(metrics[col], errors="coerce")
+        known = s.notna().values
+        if g == "roe_quality":
+            ok = (s >= GATE_ROE_QUALITY_MIN).values
+        else:
+            ok = (s <= GATE_PRICE_POSITION_MAX).values
+        mask &= np.where(known, ok, True)
+        detail[g] = {"known_days": int(known.sum()),
+                     "blocked_days": int((known & ~ok).sum())}
+    return mask, detail
+
 
 def run_valuation(code: str, start: Optional[str] = None) -> dict:
     """生成单股估值报告 → 结构化 dict（前端渲染用）。"""
@@ -177,17 +234,38 @@ def run_valuation(code: str, start: Optional[str] = None) -> dict:
     else:
         sig_col = f"{primary}_pct"
     buy_thr, sell_thr = thresholds_for(code)
+
+    # 买点门控（多因子「主信号 + 门控」）：只作用于"买"，缺数据 fail-open
+    gate_mask, gate_detail = (_gate_mask(metrics) if BUY_GATES else (None, {}))
+    gate_stats: Dict = {}
+
     if SIGNAL_MODE == "two_state":
-        events = _signal_events_hold(metrics, col=sig_col, buy=buy_thr, sell=sell_thr)
+        events = _signal_events_hold(metrics, col=sig_col, buy=buy_thr, sell=sell_thr,
+                                     gate_mask=gate_mask, stats_out=gate_stats)
     else:
-        events = _signal_events(metrics, col=sig_col, buy=buy_thr, sell=sell_thr)
-    # 多次触发标记（每次进入极端区都记；只用于第一层图上显示，不影响二态机）
-    triggers = _signal_events(metrics, col=sig_col, buy=buy_thr, sell=sell_thr)
+        events = _signal_events(metrics, col=sig_col, buy=buy_thr, sell=sell_thr,
+                                gate_mask=gate_mask)
+    # 多次触发标记（每次进入极端区都记；只用于图上显示，不影响二态机）；
+    # 被门控挡掉的买点单独收集 → 图上画空心标记
+    blocked_marks: List[Dict] = []
+    triggers = _signal_events(metrics, col=sig_col, buy=buy_thr, sell=sell_thr,
+                              gate_mask=gate_mask, blocked_out=blocked_marks)
     stats = trade_stats(metrics, events)
+    if stats:
+        stats["gate_blocked"] = gate_stats.get("blocked_buys", 0)
     roe_warn = roe_regime_warning(metrics)
+
+    gates_meta = [
+        {"key": g, "name": GATE_META[g][0], "threshold": GATE_META[g][1],
+         "op": GATE_META[g][2], "note": GATE_META[g][3],
+         "blocked_days": (gate_detail.get(g) or {}).get("blocked_days", 0)}
+        for g in BUY_GATES if g in GATE_META
+    ]
     logger.info(f"{code} {name} 信号口径: {sig_col} · 模式={SIGNAL_MODE} · 阈值 {buy_thr}/{sell_thr}"
-                f"（{'个股覆盖' if (code.zfill(6) in THRESHOLD_OVERRIDES) else '全局默认'}），"
-                f"交易 {len(events)} 笔，触发标记 {len(triggers)} 个"
+                f"（{'个股覆盖' if (code.zfill(6) in THRESHOLD_OVERRIDES) else '全局默认'}）"
+                f" · 门控 [{', '.join(g['name'] for g in gates_meta) or '无'}]"
+                f"，交易 {len(events)} 笔，触发标记 {len(triggers)} 个"
+                f"，门控挡掉买点 {gate_stats.get('blocked_buys', 0)} 天"
                 + (f"，持仓占比 {stats.get('pos_ratio', 0)*100:.0f}%，"
                    f"策略 {stats.get('strat_return', 0)*100:.0f}% vs 持有 {stats.get('bh_return', 0)*100:.0f}%"
                    if stats else "")
@@ -206,6 +284,15 @@ def run_valuation(code: str, start: Optional[str] = None) -> dict:
     else:
         mkt_note = "市场温度未缓存（先在'股票监控'页底部点击『刷新温度』后可用）"
 
+    # ---- 反转体系（月线反转 / 三线红 / 有效跌破20日线）----
+    tbs_payload = None
+    if TBS_ENABLED:
+        try:
+            tbs_payload = _tbs_markers(code, df, metrics)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"{code} 反转信号计算失败：{type(e).__name__}: {e}")
+            tbs_payload = None
+
     return build_report(code, name, as_of, readings, events, primary,
                         roe_src=(len(roe_reports) if roe_reports else 0),
                         ml_note=ml_note,
@@ -216,7 +303,62 @@ def run_valuation(code: str, start: Optional[str] = None) -> dict:
                         thresholds=(buy_thr, sell_thr),
                         triggers=triggers,
                         price_cycle=price_cycle_val, price_cycle_detail=price_cycle_detail,
-                        metrics=metrics)
+                        metrics=metrics,
+                        gates=gates_meta, blocked=blocked_marks,
+                        tbs=tbs_payload)
+
+
+def _tbs_markers(code: str, df: pd.DataFrame,
+                 metrics: pd.DataFrame) -> Optional[dict]:
+    """算反转体系三个信号的**事件标记**（对齐 metrics 的日期轴）。
+
+    月线反转/三线红是事件型（只在首次出现时标一次）；
+    卖点「有效跌破 20 日线」是状态型，这里做**状态去重**（只在首次进入时标）。
+    """
+    from .factor_rps import rps_for_code
+    from .strategy_tbs import compute_tbs
+
+    rps_df = rps_for_code(code, start=DATA_START)
+    if rps_df is None or rps_df.empty:
+        return None
+    m = compute_tbs(df, rps=rps_df)
+    if m.empty:
+        return None
+
+    # 对齐到 metrics 的日期轴（报告图以此为基准）
+    m = m.copy()
+    m["d"] = pd.to_datetime(m["date"])
+    mm = metrics[["date"]].copy()
+    mm["d"] = pd.to_datetime(mm["date"])
+    m = mm.merge(m, on="d", how="left")
+
+    closes = pd.to_numeric(m["close"], errors="coerce")
+
+    def _picks(flag_col: str, dedup_state: bool = False):
+        flag = m[flag_col].fillna(False).astype(bool)
+        if dedup_state:
+            # 状态去重：只在"由 False 变 True"的那一天记一次
+            first = flag & ~flag.shift(1, fill_value=False)
+        else:
+            first = flag
+        out = []
+        for i in np.flatnonzero(first.values):
+            px = closes.iloc[i]
+            if pd.isna(px):
+                continue
+            out.append({"date": str(mm["d"].iloc[i])[:10], "close": round(float(px), 2)})
+        return out
+
+    def _series(col: str):
+        return [None if pd.isna(v) else round(float(v), 4) for v in m[col].values]
+
+    return {
+        "buy_markers": _picks("monthly_reversal", dedup_state=True),
+        "red_markers": _picks("triple_red", dedup_state=True),
+        "rps50": _series("rps50"),
+        "rps120": _series("rps120"),
+        "rps250": _series("rps250"),
+    }
 
 
 def compute_readings(code: str, need_ps: bool = False, force: bool = False) -> Optional[dict]:
@@ -304,17 +446,21 @@ def compute_readings(code: str, need_ps: bool = False, force: bool = False) -> O
 # ---------------------------------------------------------------- 信号
 def _signal_events_hold(metrics: pd.DataFrame, col: str = "pb_adj_b_pct",
                         buy: float = DEFAULT_BUY, sell: float = DEFAULT_SELL,
-                        lookahead: int = LOOKAHEAD) -> List[Dict]:
+                        lookahead: int = LOOKAHEAD, gate_mask=None,
+                        stats_out: Optional[Dict] = None) -> List[Dict]:
     """二态机（买入持有）—— 作者"4 笔交易"口径的信号实现。
 
     状态机：只有两个状态
-        空仓：读数 < buy  → 开一笔买，进入持仓（此后读数再低不再触发，**直到**读数>sell）
+        空仓：读数 < buy **且通过门控** → 开一笔买，进入持仓（此后读数再低不再触发，
+              **直到**读数>sell）
         持仓：读数 > sell → 卖出，回到空仓（此后读数再高不再触发）
     与"每次进极端区都记一次"的 cross 口径（_signal_events，图上多次触发标记）的区别：
     两态机的买/卖事件**必然交替**，连续同向读数只记第一次进入 —— 这就是文章里
     "很多连续标记、归并成几次交易"的做法。事件数（=交易笔数）远少于标记数。
 
     buy/sell 阈值来自 `thresholds_for(code)`（个股覆盖优先于全局默认）。
+    `gate_mask`（逐日 bool）非空时：买点额外要求当日门控放行；**卖点不受门控影响**
+    （门控的目的是"别买错"，不是"别卖"）。被挡掉的天数计入 `stats_out["blocked_buys"]`。
     返回与 _signal_events 同构的事件列表（按时间升序）。
     """
     if metrics is None or metrics.empty or col not in metrics.columns:
@@ -324,27 +470,37 @@ def _signal_events_hold(metrics: pd.DataFrame, col: str = "pb_adj_b_pct",
     dates = metrics["date"].values
     ev: List[Dict] = []
     holding = False
+    blocked = 0
     for i, v in enumerate(s):
         if v is None or (isinstance(v, float) and np.isnan(v)):
             continue  # 空读数不影响状态（如回归窗口未满、季报未生效）
         if not holding and v < buy:
+            if gate_mask is not None and not bool(gate_mask[i]):
+                blocked += 1          # 信号触发但被门控挡掉：保持空仓，等下次
+                continue
             holding = True   # 空仓 → 买入
             ev.append(_mk_event(dates[i], "买", float(v), float(close[i]), close, i, lookahead))
         elif holding and v > sell:
             holding = False
             ev.append(_mk_event(dates[i], "卖", float(v), float(close[i]), close, i, lookahead))
+    if stats_out is not None:
+        stats_out["blocked_buys"] = blocked
     return ev
 
 
 def _signal_events(metrics: pd.DataFrame, col: str = "pb_adj_b_pct",
                    buy: float = DEFAULT_BUY, sell: float = DEFAULT_SELL,
-                   lookahead: int = LOOKAHEAD) -> List[Dict]:
+                   lookahead: int = LOOKAHEAD, gate_mask=None,
+                   blocked_out: Optional[List[Dict]] = None) -> List[Dict]:
     """cross 口径（多次触发标记）：每次"进入"极端区都记一次，供第一层图上全画。
 
     与二态机 `_signal_events_hold` 的区别：这里 state 在读数回到中间区时清零，
     因此同一轮行情里"围绕阈值反复穿越"会记成多个标记（京东方 54 个/兴业 22 个…）。
     **只用于展示**（`triggers`→图），不构成交易、不进统计；真正驱动交易表/统计的
     仍是二态机的 events。事件列表同构：[{date, kind, read, close, fwd60}]。
+
+    `gate_mask` 非空时：被门控挡掉的买点不进标记，改为追加到 `blocked_out`
+    （供前端画"信号触发但被门控拦下"的空心标记；连续被挡只记第一天）。
     """
     if metrics is None or metrics.empty or col not in metrics.columns:
         return []
@@ -353,19 +509,30 @@ def _signal_events(metrics: pd.DataFrame, col: str = "pb_adj_b_pct",
     dates = metrics["date"].values
     ev: List[Dict] = []
     state: Optional[str] = None
+    blocked_streak = False
     for i, v in enumerate(s.values):
         if v is None or (isinstance(v, float) and np.isnan(v)):
             continue
         if v < buy:
+            if gate_mask is not None and not bool(gate_mask[i]):
+                if not blocked_streak and blocked_out is not None:
+                    blocked_out.append({"date": str(pd.Timestamp(dates[i]))[:10],
+                                        "read": round(float(v), 4),
+                                        "close": round(float(close[i]), 2)})
+                blocked_streak = True
+                continue
+            blocked_streak = False
             if state != "buy":
                 ev.append(_mk_event(dates[i], "买", float(v), float(close[i]), close, i, lookahead))
                 state = "buy"
         elif v > sell:
+            blocked_streak = False
             if state != "sell":
                 ev.append(_mk_event(dates[i], "卖", float(v), float(close[i]), close, i, lookahead))
                 state = "sell"
         else:
             state = None
+            blocked_streak = False
     return ev
 
 

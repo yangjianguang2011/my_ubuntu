@@ -1,8 +1,8 @@
 #!/bin/bash
-# 每日：停库 -> 同步数据 -> 起库（本机 stockdb，以 jgyang 非 root 运行）
+# 每日：停库 -> 同步数据 -> 起库（本机 stockdb，以 NAS 普通用户非 root 运行）
 #
 # 部署位置（NAS 宿主机）: /vol1/1000/docker/my-ubuntu/apps/stockdb/sync_and_restart.sh
-# crontab（用户 jgyang）:
+# crontab（NAS 普通用户，非 root；用户名见部署环境）:
 #   @reboot sleep 30; cd /vol1/1000/docker/my-ubuntu/apps/stockdb && ./stockdb -d -s start ./stockdb.conf >> ./sync_cron.log 2>&1
 #   0 16 * * * /vol1/1000/docker/my-ubuntu/apps/stockdb/sync_and_restart.sh
 cd /vol1/1000/docker/my-ubuntu/apps/stockdb || exit 1

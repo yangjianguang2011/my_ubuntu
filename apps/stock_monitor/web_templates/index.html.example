@@ -1,3 +1,5 @@
+<!-- 首页模板（脱敏版）。此文件入库；真实 index.html 不入库（.gitignore）。
+     修改 index.html 后请同步本文件：把上面两个私有域名替换为 *.example.com。 -->
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -85,87 +87,95 @@
         
         <!-- 策略选股页面 -->
         <div id="picker-page" class="page-content">
-            <h2>策略选股 <span style="font-size:14px;color:#999;">多头结构 · 金叉确认 · 回踩确认</span></h2>
+            <h2>策略选股 <span style="font-size:14px;color:#999;">技术面 × 估值面 · 条件自由组合（AND）</span></h2>
 
-            <div style="background:#f7f9fb;border:1px solid #e6e9ee;border-radius:6px;padding:14px 16px;margin-bottom:14px;">
-                <p style="margin:0 0 4px;color:#555;font-size:13px;">
-                    规则：<b>A 多头结构</b>(价格&gt;慢线、快&gt;中&gt;慢、快线向上) <b>· B 金叉确认</b>(中线上穿慢线，且在观察窗内)
-                    <b>· C 回踩确认</b>(收盘贴近快线且不深破中线、近窗口出现过回踩) ；量能缩量属软条件。
-                </p>
-                <p style="margin:0;color:#777;font-size:12px;">扫描在后台执行(逐股拉日线行情，数百只需数分钟)，期间可轮询进度；结果自动存入快照便于日后查看表现。</p>
-            </div>
-
-            <div style="display:flex;flex-wrap:wrap;gap:14px;margin-bottom:14px;align-items:flex-end;">
-                <label style="display:flex;flex-direction:column;font-size:13px;color:#666;">
-                    股票池
-                    <select id="pk-pool" style="margin-top:4px;padding:6px;">
-                        <option value="hs300">沪深300</option>
-                        <option value="zz500">中证500</option>
-                    </select>
-                </label>
-                <label style="display:flex;flex-direction:column;font-size:13px;color:#666;">
-                    快线MA(回调支撑)
-                    <input id="pk-ma-fast" type="number" value="20" style="margin-top:4px;width:70px;padding:6px;">
-                </label>
-                <label style="display:flex;flex-direction:column;font-size:13px;color:#666;">
-                    中线MA(金叉方)
-                    <input id="pk-ma-mid" type="number" value="60" style="width:70px;padding:6px;margin-top:4px;">
-                </label>
-                <label style="display:flex;flex-direction:column;font-size:13px;color:#666;">
-                    慢线MA(趋势)
-                    <input id="pk-ma-slow" type="number" value="200" style="width:90px;padding:6px;margin-top:4px;">
-                </label>
-                <label style="display:flex;flex-direction:column;font-size:13px;color:#666;">
-                    金叉观察窗(根)
-                    <input id="pk-cross-lookback" type="number" value="120" style="width:80px;padding:6px;margin-top:4px;">
-                </label>
-                <label style="display:flex;flex-direction:column;font-size:13px;color:#666;">
-                    现价距快线上限(%)
-                    <input id="pk-pullhigh" type="number" value="5.0" step="0.5" style="width:90px;padding:6px;margin-top:4px;">
-                </label>
-                <fieldset style="border:1px dashed #c9d2dc;border-radius:6px;margin:0;padding:4px 10px 8px;">
-                    <legend style="font-size:12px;color:#888;padding:0 4px;">回踩确认带(LOW可触及, 相对快线%)</legend>
-                    <div style="display:flex;gap:12px;">
-                        <label style="display:flex;flex-direction:column;font-size:12px;color:#666;">上浮
-                            <input id="pk-touch-above" type="number" value="3.0" step="0.5" style="width:70px;padding:5px;margin-top:3px;">
-                        </label>
-                        <label style="display:flex;flex-direction:column;font-size:12px;color:#666;">下探
-                            <input id="pk-touch-below" type="number" value="1.5" step="0.1" style="width:70px;padding:5px;margin-top:3px;">
-                        </label>
-                    </div>
-                </fieldset>
-                <label style="display:flex;align-items:center;gap:4px;font-size:13px;color:#666;margin-bottom:8px;">
-                    <input id="pk-volume" type="checkbox"> 启用缩量软条件
-                </label>
-                <label style="display:flex;align-items:center;gap:4px;font-size:13px;color:#666;margin-bottom:8px;">
-                    <input id="pk-force" type="checkbox"> 强制重拉行情(忽略缓存)
-                </label>
-                <div style="display:flex;gap:8px;">
-                    <button id="pk-run" style="padding:8px 16px;">开始扫描</button>
-                    <button id="pk-stop" style="padding:8px 16px;" disabled>停止</button>
+            <!-- 区 ① 数据范围 -->
+            <div style="background:#f7f9fb;border:1px solid #e6e9ee;border-left:4px solid #1890ff;border-radius:6px;padding:12px 16px;margin-bottom:12px;">
+                <div style="font-weight:600;color:#1890ff;font-size:13px;margin-bottom:8px;">① 数据范围</div>
+                <div style="display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;">
+                    <label style="display:flex;flex-direction:column;font-size:13px;color:#666;">
+                        股票池
+                        <select id="pk-pool" style="margin-top:4px;padding:6px;">
+                            <option value="union">优选池（沪深300+中证500+中证1000+中证2000）</option>
+                            <option value="hs300">沪深300</option>
+                            <option value="zz500">中证500</option>
+                            <option value="zz1000">中证1000</option>
+                            <option value="zz2000">中证2000</option>
+                            <option value="all">全市场（约 7500 只）</option>
+                        </select>
+                    </label>
+                    <!-- 全局参数（均线体系）由 picker_view.js 按 /api/picker/conditions 动态生成 -->
+                    <div id="pk-global-params" style="display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;"></div>
+                    <label style="display:flex;align-items:center;gap:4px;font-size:13px;color:#666;margin-bottom:8px;">
+                        <input id="pk-force" type="checkbox"> 强制重拉行情(忽略缓存)
+                    </label>
                 </div>
             </div>
 
-            <!-- 进度 -->
-            <div style="margin-bottom:14px;display:flex;align-items:center;gap:10px;">
-                <div id="pk-status" style="font-size:13px;color:#333;">空闲</div>
-            </div>
-            <div style="height:8px;background:#eef0f3;border-radius:4px;overflow:hidden;margin-bottom:6px;">
-                <div id="pk-bar" style="height:100%;width:0%;background:#1890ff;transition:width .3s;"></div>
+            <!-- 区 ② 技术面 -->
+            <div style="background:#f4f9f4;border:1px solid #d6e8d6;border-left:4px solid #1f7a33;border-radius:6px;padding:12px 16px;margin-bottom:12px;">
+                <div style="font-weight:600;color:#1f7a33;font-size:13px;margin-bottom:8px;">
+                    ② 技术面条件
+                    <span style="font-weight:normal;color:#7a9a7a;font-size:11px;">（快：批量取日K一次算完，全池约 5s）</span>
+                </div>
+                <div id="pk-conditions-tech" style="display:flex;flex-wrap:wrap;gap:10px;"></div>
             </div>
 
-            <!-- 命中/观察 结果 -->
-            <div style="display:flex;gap:10px;margin-bottom:8px;">
-                <button id="pk-tab-hit" class="pk-tab active" style="padding:6px 14px;">完整命中</button>
-                <button id="pk-tab-part" class="pk-tab" style="padding:6px 14px;">观察(部分命中)</button>
-                <button id="pk-tab-hist" class="pk-tab" style="padding:6px 14px;">历史快照</button>
+            <!-- 区 ③ 策略信号（月线反转 / 三线红） -->
+            <div id="pk-block-strat" style="background:#fffaf0;border:1px solid #f7e2c0;border-left:4px solid #b9770e;border-radius:6px;padding:12px 16px;margin-bottom:12px;">
+                <div style="font-weight:600;color:#b9770e;font-size:13px;margin-bottom:8px;">
+                    ③ 策略信号（月线反转）
+                    <span style="font-weight:normal;color:#c9a227;font-size:11px;">
+                        （横截面 RPS 相对强度：与「相对自身历史」的读数正交；只在勾选时才计算 RPS）
+                    </span>
+                </div>
+                <div id="pk-conditions-strat" style="display:flex;flex-wrap:wrap;gap:10px;"></div>
+                <div style="font-size:11px;color:#b08850;margin-top:8px;">
+                    ⚠️ 限定月线反转「主要适用于<b>熊市中后期与牛市初期</b>」；
+                    它只是<b>初选股票池</b>，不含任何基本面条件。
+                </div>
             </div>
-            <div style="overflow:auto;background:#fff;border:1px solid #e6e9ee;border-radius:6px;">
-                <table id="pk-table" class="pk-table" style="width:100%;border-collapse:collapse;font-size:13px;">
-                    <thead id="pk-thead"></thead>
-                    <tbody id="pk-tbody"></tbody>
-                </table>
-                <div id="pk-empty" style="padding:18px;text-align:center;color:#aaa;">尚未扫描。选择参数后点击“开始扫描”。</div>
+
+            <!-- 区 ④ 估值面 -->
+            <div style="background:#faf7fd;border:1px solid #e8ddf0;border-left:4px solid #8e44ad;border-radius:6px;padding:12px 16px;margin-bottom:12px;">
+                <div style="font-weight:600;color:#8e44ad;font-size:13px;margin-bottom:8px;">
+                    ★ ④ 估值面条件
+                    <span style="font-weight:normal;color:#a58bb8;font-size:11px;">
+                        （较慢：只对**通过技术面**的股票计算；若只勾估值条件则全池计算，首次约 31s，结果按天缓存）
+                    </span>
+                </div>
+                <div id="pk-conditions-val" style="display:flex;flex-wrap:wrap;gap:10px;"></div>
+            </div>
+
+            <!-- 区 ⑤ 执行 -->
+            <div style="background:#fff;border:1px solid #e6e9ee;border-left:4px solid #f39c12;border-radius:6px;padding:12px 16px;margin-bottom:12px;">
+                <div style="font-weight:600;color:#b9770e;font-size:13px;margin-bottom:8px;">⑤ 执行</div>
+                <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+                    <button id="pk-run" style="padding:9px 22px;font-size:14px;font-weight:600;">▶ 开始扫描</button>
+                    <button id="pk-stop" style="padding:9px 18px;" disabled>■ 停止</button>
+                    <span id="pk-status" style="font-size:13px;color:#333;">空闲</span>
+                    <span id="pk-summary" style="margin-left:auto;color:#888;font-size:12px;"></span>
+                </div>
+                <div style="height:8px;background:#eef0f3;border-radius:4px;overflow:hidden;margin-top:10px;">
+                    <div id="pk-bar" style="height:100%;width:0%;background:#1890ff;transition:width .3s;"></div>
+                </div>
+            </div>
+
+            <!-- 区 ⑥ 结果 -->
+            <div style="background:#fff;border:1px solid #e6e9ee;border-left:4px solid #7f8c8d;border-radius:6px;padding:12px 16px;">
+                <div style="font-weight:600;color:#555;font-size:13px;margin-bottom:8px;">⑥ 结果</div>
+                <div style="display:flex;gap:10px;margin-bottom:8px;">
+                    <button id="pk-tab-hit" class="pk-tab active" style="padding:6px 14px;">完整命中</button>
+                    <button id="pk-tab-part" class="pk-tab" style="padding:6px 14px;">观察(部分命中)</button>
+                    <button id="pk-tab-hist" class="pk-tab" style="padding:6px 14px;">历史快照</button>
+                </div>
+                <div style="overflow:auto;background:#fff;border:1px solid #e6e9ee;border-radius:6px;">
+                    <table id="pk-table" class="pk-table" style="width:100%;border-collapse:collapse;font-size:13px;">
+                        <thead id="pk-thead"></thead>
+                        <tbody id="pk-tbody"></tbody>
+                    </table>
+                    <div id="pk-empty" style="padding:18px;text-align:center;color:#aaa;">尚未扫描。勾选条件后点击“开始扫描”。</div>
+                </div>
             </div>
         </div>
         
@@ -437,11 +447,11 @@
         <div style="display: flex; flex-wrap: wrap; gap: 20px;">
             <div style="flex: 1; min-width: 200px;">
                 <h3 style="margin-top: 0; color: #555;">微信消息推送服务</h3>
-                <p><a href="https://your-message-server/" target="_blank" style="color: #1890ff; text-decoration: none;">访问微信消息推送服务</a></p>
+                <p><a href="https://message.example.com/" target="_blank" style="color: #1890ff; text-decoration: none;">访问微信消息推送服务</a></p>
             </div>
             <div style="flex: 1; min-width: 200px;">
                 <h3 style="margin-top: 0; color: #555;">历史备份数据</h3>
-                <p><a href="https://your-data-server/eastmoney/" target="_blank" style="color: #1890ff; text-decoration: none;">访问历史备份数据</a></p>
+                <p><a href="https://blog.example.com/eastmoney/" target="_blank" style="color: #1890ff; text-decoration: none;">访问历史备份数据</a></p>
             </div>
 
             <div style="flex: 1; min-width: 200px;">
@@ -455,10 +465,13 @@
         </div>
     </div>
 
-    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
-    <script src="https://unpkg.com/tabulator-tables@5.6.1/dist/js/tabulator.min.js"></script>
-    <link href="https://unpkg.com/tabulator-tables@5.6.1/dist/css/tabulator.min.css" rel="stylesheet">
-    <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
+    <!-- 前端库改为**本地托管**：原先依赖 3 个境外 CDN（jsdelivr / unpkg / code.jquery.com），
+         任一不通会导致 ECharts / Tabulator / jQuery 整块失效（K线图、表格都挂），且需要科学上网。
+         库文件已放到 web_static/vendor/，由 /static/vendor/... 提供。 -->
+    <script src="/static/vendor/jquery.min.js"></script>
+    <script src="/static/vendor/tabulator.min.js"></script>
+    <link href="/static/vendor/tabulator.min.css" rel="stylesheet">
+    <script src="/static/vendor/echarts.min.js"></script>
     <script src="/static/js/modules/stock_view.js"></script>
     <script src="/static/js/modules/analyst_view.js"></script>
     <script src="/static/js/modules/index_view.js"></script>

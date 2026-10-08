@@ -99,9 +99,10 @@ COPY ./apps/news/requirements.txt /tmp/news_requirements.txt
 RUN pip3 install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple -r /tmp/news_requirements.txt && rm /tmp/news_requirements.txt
 
 # 8. 复制配置文件（应用配置放到 /root/apps 下）
-#    说明：config.ini 为私人配置、不入库；本步骤依赖构建机上存在该文件。
-#    后续可改为运行时挂载（见 README）。
-COPY ./apps/config.ini /root/apps/config.ini
+#    说明：**镜像里只放脱敏版**（config.ini.example → config.ini），私有真值不入镜像；
+#    运行时由 docker-compose 的 volumes 把宿主真文件挂载覆盖（见 docker-compose.yml）。
+#    这样 `docker compose build` 不再依赖构建机上存在私有 config.ini。
+COPY ./apps/config.ini.example /root/apps/config.ini
 COPY ./apps/config.py /root/apps/config.py
 
 # 9. 复制代码文件
@@ -113,7 +114,8 @@ COPY ./configs/nginx.conf /etc/nginx/nginx.conf
 COPY ./apps/iptv /root/apps/iptv
 COPY ./apps/news /root/apps/news
 COPY ./apps/stock_monitor /root/apps/stock_monitor
-# 首页模板：私有 index.html 不入库/不进镜像，用 example 生成（.dockerignore 已排除 index.html）
+# 首页模板：镜像里放脱敏版（.example）；真 index.html 由 compose 挂载覆盖
+# （.dockerignore 已排除真 index.html，故它不会被打进镜像）
 COPY ./apps/stock_monitor/web_templates/index.html.example /root/apps/stock_monitor/web_templates/index.html
 COPY ./apps/xueqiu_api /root/apps/xueqiu_api
 COPY ./apps/eastmoney /root/apps/eastmoney

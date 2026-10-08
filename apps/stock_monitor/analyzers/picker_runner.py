@@ -35,6 +35,7 @@ from ..core.runner_base import finish_task, start_task
 from ..data_fetchers.pool_data_fetcher import POOL_NAME, load_pool
 from ..data_fetchers.stockdb_data_fetcher import get_raw
 from .conditions import (
+    GROUP_STRATEGY,
     GROUP_TECH,
     GLOBAL_PARAMS,
     all_conditions,
@@ -105,7 +106,7 @@ class ScreenRunner:
     def start(self, conditions: Optional[dict] = None,
               global_params: Optional[dict] = None,
               legacy_params: Optional[dict] = None,
-              pool: str = "hs300", force_refresh: bool = False):
+              pool: str = "union", force_refresh: bool = False):
         """启动扫描。`pool`/参数非法会**同步抛 ValueError**（供 Web 层返回 400）。
 
         `conditions`：`{cid: {"enabled": bool, "params": {...}}}`；
@@ -146,11 +147,24 @@ class ScreenRunner:
             if not constituents:
                 finish_task(st, RuntimeError("获取成分股为空，扫描未开始"))
                 return
+            if len(constituents) > 3000:
+                st.message = (f"注意：全市场池 {len(constituents)} 只，"
+                              "逐股扫描会比较久（技术面约几分钟）")
 
             names = {r["code"]: r.get("name", "") for r in constituents}
             codes = list(names)
             tech_conds = [(c, p) for c, p in plan["enabled"] if c.group == GROUP_TECH]
-            val_conds = [(c, p) for c, p in plan["enabled"] if c.group != GROUP_TECH]
+            strat_conds = [(c, p) for c, p in plan["enabled"]
+                           if c.group == GROUP_STRATEGY]
+            val_conds = [(c, p) for c, p in plan["enabled"]
+                         if c.group not in (GROUP_TECH, GROUP_STRATEGY)]
+
+            # ---------- ⓪ RPS 底座（仅当勾了「策略信号」条件才算）----------
+            rps_map: Dict[str, pd.DataFrame] = {}
+            if strat_conds:
+                rps_map = self._build_rps(codes, plan["wanted"], st)
+                if not rps_map:
+                    st.message = "RPS 计算失败，策略信号条件无法评估"
 
             # ---------- ① 技术面粗筛 ----------
             st.stage = f"技术面粗筛（{len(codes)} 只）"
@@ -165,6 +179,9 @@ class ScreenRunner:
             ma_windows = sorted({plan["global"]["ma_fast"], plan["global"]["ma_mid"],
                                  plan["global"]["ma_slow"]})
             ma_needs = max(ma_windows)
+            # 策略信号（月线反转）需要 ≥250 根才能算 MA200/250，故抬高最低根数要求
+            if strat_conds:
+                ma_needs = max(ma_needs, 251)
 
             tech_ok: List[Tuple[str, dict, List[dict]]] = []   # (code, frame, reasons)
             for i, code in enumerate(codes):
@@ -183,7 +200,9 @@ class ScreenRunner:
                     st.failed += 1
                     continue
 
-                reasons, passed = self._eval(frame, tech_conds, ma_needs, {})
+                ctx_extra = {"code": code, "rps": rps_map}
+                reasons, passed = self._eval(frame, tech_conds, ma_needs, {},
+                                             extra=ctx_extra)
                 if passed:
                     tech_ok.append((code, frame, reasons))
                 else:
@@ -201,14 +220,47 @@ class ScreenRunner:
             st.message = f"技术面通过 {len(tech_ok)} 只"
             logger.info(f"技术面粗筛完成：{st.total} → {len(tech_ok)} 只")
 
-            # ---------- ② 估值面精筛（按需）----------
-            if val_conds and tech_ok:
+            # ---------- ② 策略信号（在通过技术面的样本上；不需要估值数据）----------
+            # 说明：策略信号 + 估值面是**同一套筛选链**，都只对"上一阶段幸存者"评估
+            #       （旧实现把两者并列且各自 append，导致重复计数 + "只勾策略"时全过）
+            survivors: List[Tuple[str, dict, List[dict]]] = tech_ok
+            if strat_conds:
+                st.stage = f"策略信号（{len(survivors)} 只）"
+                st.stage_total = len(survivors)
+                passed_list: List[Tuple[str, dict, List[dict]]] = []
+                for j, (code, frame, reasons) in enumerate(survivors):
+                    if self._stop.is_set():
+                        st.message = "已手动停止"
+                        break
+                    st.done = j + 1
+                    r2, ok = self._eval(frame, strat_conds, ma_needs, {},
+                                        extra={"code": code, "rps": rps_map})
+                    reasons = reasons + r2
+                    summary = {"code": code, "name": names.get(code, ""),
+                               **compact_latest(frame)}
+                    if ok:
+                        passed_list.append((code, frame, reasons))
+                    else:
+                        on = [r["rule_id"] for r in reasons if r["passed"]]
+                        if on:
+                            summary["hit_rules"] = on
+                            summary["reasons"] = reasons
+                            st.partial.append(summary)
+                    if j % 5 == 0:
+                        st.message = (f"策略信号 {st.done}/{st.stage_total}"
+                                      f"…通过 {len(passed_list)}")
+                survivors = passed_list
+                st.message = f"策略信号通过 {len(survivors)} 只"
+                logger.info(f"策略信号筛选完成：{len(tech_ok)} → {len(survivors)} 只")
+
+            # ---------- ③ 估值面精筛（按需，只对上一阶段幸存者）----------
+            if val_conds and survivors:
                 from .valuation_engine import compute_readings
 
                 need_ps = any("ps" in c.needs for c, _ in val_conds)
-                st.stage = f"估值面精筛（{len(tech_ok)} 只{'，含营收' if need_ps else ''}）"
-                st.stage_total = len(tech_ok)
-                for j, (code, frame, reasons) in enumerate(tech_ok):
+                st.stage = f"估值面精筛（{len(survivors)} 只{'，含营收' if need_ps else ''}）"
+                st.stage_total = len(survivors)
+                for j, (code, frame, reasons) in enumerate(survivors):
                     if self._stop.is_set():
                         st.message = "已手动停止"
                         break
@@ -219,7 +271,8 @@ class ScreenRunner:
                     except Exception as e:  # noqa: BLE001
                         logger.warning(f"估值读数失败 {code}: {type(e).__name__}: {e}")
                         readings = None
-                    r2, passed = self._eval(frame, val_conds, ma_needs, readings or {})
+                    r2, passed = self._eval(frame, val_conds, ma_needs, readings or {},
+                                            extra={"code": code, "rps": rps_map})
                     reasons = reasons + r2
                     summary = {"code": code, "name": names.get(code, ""),
                                **compact_latest(frame)}
@@ -234,14 +287,8 @@ class ScreenRunner:
                             st.partial.append(summary)
                     if j % 5 == 0:
                         st.message = f"估值精筛 {st.done}/{st.stage_total}…命中 {len(st.matched)}"
-            elif tech_conds:
-                # 只勾技术条件：技术面全过即命中
-                for code, frame, reasons in tech_ok:
-                    summary = {"code": code, "name": names.get(code, ""),
-                               **compact_latest(frame), "reasons": reasons}
-                    st.matched.append(summary)
-            else:
-                # 只勾估值条件：没有粗筛依据 → 全池精算
+            elif val_conds:
+                # 勾了估值条件但上一阶段已无幸存者 → 没有粗筛依据时走全池精算
                 from .valuation_engine import compute_readings
 
                 need_ps = any("ps" in c.needs for c, _ in val_conds)
@@ -262,7 +309,9 @@ class ScreenRunner:
                     except Exception as e:  # noqa: BLE001
                         logger.warning(f"估值读数失败 {code}: {type(e).__name__}: {e}")
                         readings = None
-                    reasons, passed = self._eval(frame, val_conds, ma_needs, readings or {})
+                    reasons, passed = self._eval(frame, val_conds, ma_needs,
+                                                 readings or {},
+                                                 extra={"code": code, "rps": rps_map})
                     summary = {"code": code, "name": names.get(code, ""),
                                **compact_latest(frame)}
                     if passed:
@@ -276,8 +325,19 @@ class ScreenRunner:
                             st.partial.append(summary)
                     if j % 5 == 0:
                         st.message = f"估值精筛 {st.done}/{st.stage_total}…命中 {len(st.matched)}"
+            elif survivors:
+                # 只勾技术面 / 策略信号：幸存者即命中
+                for code, frame, reasons in survivors:
+                    summary = {"code": code, "name": names.get(code, ""),
+                               **compact_latest(frame), "reasons": reasons}
+                    st.matched.append(summary)
 
             st.stage = "完成"
+            # 结果按**股票代码升序**排列（便于对照观察；实时与历史快照都生效）
+            _by_code = lambda m: str(m.get("code") or "")
+            st.matched.sort(key=_by_code)
+            st.partial.sort(key=_by_code)
+
             st.run_id = self._persist_snapshot(plan, pool_key, st.matched, st.total, st.failed)
             st.message = (
                 f"完成：命中 {len(st.matched)}"
@@ -290,7 +350,7 @@ class ScreenRunner:
             finish_task(st, e)
 
     @staticmethod
-    def _eval(frame, conds, ma_needs: int, readings: dict):
+    def _eval(frame, conds, ma_needs: int, readings: dict, extra: dict = None):
         """评估一组条件（纯函数）。返回 (reasons, 全部通过)。"""
         if not conds:
             return [], True
@@ -299,6 +359,8 @@ class ScreenRunner:
                      "note": f"交易日({0 if frame is None else len(frame)})不足计算 {ma_needs} 日均线",
                      "metrics": {"bars": 0 if frame is None else len(frame), "need": ma_needs}}], False
         ctx = {"frame": frame, "readings": readings}
+        if extra:
+            ctx.update(extra)
         reasons, passed = [], True
         for c, prepared in conds:
             try:
@@ -310,6 +372,56 @@ class ScreenRunner:
                             "note": r.get("note", ""), "metrics": r.get("metrics", {})})
             passed = passed and bool(r.get("passed"))
         return reasons, passed
+
+    @staticmethod
+    def _build_rps(codes: List[str], wanted: int, st) -> Dict[str, pd.DataFrame]:
+        """横截面 RPS 预计算：{code: 单只 RPS DataFrame}。
+
+        RPS 必须**全市场**算（否则排名失真），故这里按池代码**批量取数后再横截面排名**；
+        为控制耗时，窗口只取策略信号需要的 50/120/250，起点按 `wanted` 反推。
+        结果写 `cache.db`（TTL 见 `factor_rps.RPS_CACHE_TTL_HOURS`），下次命中即秒回。
+        """
+        from .factor_rps import (RpsParams, compute_rps,
+                                 load_picker_rps_cached, store_picker_rps_cached)
+
+        try:
+            st.message = f"计算 RPS 相对强度（{len(codes)} 只，横截面）…"
+            natural = int(max(wanted, 300) * 7 / 5) + 120
+            start = (pd.Timestamp.now() - pd.Timedelta(days=natural)).strftime("%Y%m%d")
+
+            # ① 先查磁盘缓存（按"池指纹 + 起点"为 key）
+            hit = load_picker_rps_cached(codes, start)
+            if hit:
+                st.message = "RPS 命中缓存"
+                logger.info(f"RPS 命中磁盘缓存：{len(hit)} 只")
+                return hit
+
+            # ② 未命中 → 池内批量取数 + 横截面排名
+            raw = get_raw(codes, start=start, end=None, fq="qfq",
+                          fields="date,code,close,volume")
+            if raw is None or len(raw) == 0:
+                return {}
+            raw = raw.copy()
+            raw["date"] = pd.to_datetime(raw["date"].astype("int64").astype(str),
+                                         format="%Y%m%d")
+            raw["code"] = raw["code"].astype(str).str.zfill(6)
+            close = raw.pivot_table(index="date", columns="code",
+                                    values="close").sort_index()
+            vol = raw.pivot_table(index="date", columns="code",
+                                  values="volume").sort_index()
+            res = compute_rps(close, RpsParams(), volume=vol)
+            cols = ("rps50", "rps120", "rps250")
+            out: Dict[str, pd.DataFrame] = {}
+            for code in close.columns:
+                part = pd.DataFrame({c: res[c][code] for c in cols})
+                part["date"] = close.index
+                out[code] = part.reset_index(drop=True)
+            store_picker_rps_cached(codes, start, out)
+            logger.info(f"RPS 预计算完成：{len(out)} 只")
+            return out
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"RPS 预计算失败：{type(e).__name__}: {e}")
+            return {}
 
     @staticmethod
     def _fetch_kline(codes: List[str], wanted: int) -> Optional[pd.DataFrame]:
@@ -441,14 +553,19 @@ def build_plan(conditions: Optional[dict], global_params: Optional[dict],
         if c.id == "volume_shrink":
             # 软条件：沿用原语义，`use_volume_shrink` 由"是否启用"决定
             cp = dict(cp, use_volume_shrink=True)
-        # ⚠️ 没有 `prepare` 钩子的条件（ma_arrangement / ma_slope / bias_band / 估值类）
+        # ⚠️ 没有 `prepare` 钩子的条件（ma_slope / bias_band / 估值类 / 策略信号）
         #    也要拿到**全局参数**（ma_fast/ma_mid/ma_slow），否则读 p['ma_fast'] 会 KeyError。
         #    带 `prepare` 的条件由 `_prep_rules(gp, cp)` 内部完成同样的合并。
-        prepared = c.prepare(gp, cp) if c.prepare else {**gp, **cp}
+        #    策略信号**不依赖**全局均线参数（月线反转用固定 20/120/200/250），故只给自身参数。
+        if c.group == GROUP_STRATEGY:
+            prepared = dict(cp)
+        else:
+            prepared = c.prepare(gp, cp) if c.prepare else {**gp, **cp}
         enabled.append((c, prepared))
 
     plan = {"global": gp, "enabled": enabled,
-            "need_val": any(c.group != GROUP_TECH for c, _ in enabled)}
+            "need_val": any(c.group not in (GROUP_TECH, GROUP_STRATEGY)
+                            for c, _ in enabled)}
     plan["wanted"] = _wanted(plan)      # 需要的交易日根数（含金叉回溯的窗口修正）
     return plan
 

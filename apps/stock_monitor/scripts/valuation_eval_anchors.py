@@ -88,13 +88,14 @@ def main(codes=None):
                   f"{doc:>8.3f}   B轨ROE={roe_txt}")
 
     if latest:
-        print("\n--- 市赚率 PR（最新，三口径；文章：PR = PE/ROE，越低越划算）---")
-        hdr = f"{'标的':<16}{'隐含ROE':>9}{'季报ROE':>9}{'多年均ROE':>10}{'N':>7}{'修正PR':>9}"
+        print("\n--- 市赚率 PR（最新；文章：PR = PE/ROE，越低越划算）---")
+        # pr_b / pr_avg 已于 2026-10-02 移除（与 pe_ttm 同形，冗余口径）
+        hdr = f"{'标的':<16}{'市赚率PR':>10}{'N':>7}{'修正PR':>10}"
         print(hdr)
         print("-" * len(hdr))
         for code, name, r in latest:
-            print(f"{name + '(' + code + ')':<16}{_val(r, 'pr'):>9}{_val(r, 'pr_b'):>9}"
-                  f"{_val(r, 'pr_avg'):>10}{_val(r, 'n'):>7}{_val(r, 'pr_adj'):>9}")
+            print(f"{name + '(' + code + ')':<16}{_val(r, 'pr'):>10}"
+                  f"{_val(r, 'n'):>7}{_val(r, 'pr_adj'):>10}")
     print("文章锚点：0830 文（新和成/老凤祥/福耀/工行，读数截至 2026-08-28）、0905 文（新和成日期）、0906 文（氯碱）。")
 
 

@@ -155,6 +155,30 @@ def get_paths():
     }
 
 
+# ==================== 本地可执行文件 ====================
+
+
+def chromedriver_path():
+    """本地 chromedriver 的路径（找不到返回 `None`）。
+
+    用途：**显式**传给 `webdriver.Chrome(service=Service(...))`，让 Selenium 完全跳过
+    Selenium Manager 的联网解析。
+
+    背景（2026-10-01 排查）：本容器对 `googlechromelabs.github.io` 的版本清单接口
+    **长期失败**（`error sending request` / `error decoding response body`），而
+    Selenium Manager 每次建 driver 都会先试它。有缓存时可回退（白等 5 分钟后成功，
+    历史日志里 76 次），**09-24 升级 chrome/chromedriver 到 154.0.8037.57 后该版本
+    没有缓存可退 → 硬失败**（66 次 `Unable to obtain driver for chrome`）。
+    显式指定本地驱动后**完全不联网**：建 driver 从 ~32s（或超时 5 分钟失败）降到 0.3s。
+    """
+    import shutil
+
+    for p in ("/usr/local/bin/chromedriver", "/usr/bin/chromedriver", "/opt/chromedriver"):
+        if os.path.exists(p):
+            return p
+    return shutil.which("chromedriver")
+
+
 # ==================== 日志配置 ====================
 
 

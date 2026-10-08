@@ -67,32 +67,40 @@ def _dates(metrics: pd.DataFrame) -> List[str]:
     return [str(pd.Timestamp(v))[:10] for v in metrics["date"].values]
 
 
-def _extract_chart(metrics: pd.DataFrame, events: List[Dict], primary: str) -> dict:
-    """ECharts 三层时序所需数据（第2层右轴挂季报年化 ROE 原始值）。"""
+def _extract_chart(metrics: pd.DataFrame, events: List[Dict], primary: str,
+                   blocked: Optional[List[Dict]] = None,
+                   tbs: Optional[Dict] = None) -> dict:
+    """ECharts **四层**时序所需数据。
+
+    层序（与前端 valuation_view.js 一致）：
+      0 价格（收盘价 + 买卖/被挡标记 + **月线反转/三线红/跌破20线卖点**）
+      1 估值读数（融合 / 盈利调节 / PB / PE）
+      2 市赚率（pr_pct）+ 右轴季报年化 ROE 原始值
+      3 门控（价格周期位置 / 季报ROE位置 / **反转条件组 FYX1~7**）
+    """
     chart = {"dates": _dates(metrics)}
 
-    # 第1层：收盘价
+    # 第0层：收盘价
     if "close" in metrics.columns:
         chart["close"] = _s2list(metrics["close"])
 
-    # 各层曲线：融合读数 + 盈利调节读数 + PB/PE（pct）
+    # 第1层：估值读数
     for col in ("fusion_pct", "pb_adj_b_pct", "pb_adj_pct", "ps_adj_pct",
                 "pb_pct", "pe_ttm_pct"):
         if col in metrics.columns:
             chart[col] = _s2list(metrics[col])
 
-    # 第2层右轴：季报年化 ROE 原始值（小数，前端 ×100 显示；图例默认隐藏）
+    # 第2层：市赚率位置 + 右轴季报年化 ROE 原始值（小数，前端 ×100 显示；图例默认隐藏）
+    if "pr_pct" in metrics.columns:
+        chart["pr_pct"] = _s2list(metrics["pr_pct"])
     if "roe_step_b" in metrics.columns and metrics["roe_step_b"].notna().any():
         chart["roe_step_b"] = _s2list(metrics["roe_step_b"])
 
-    # 第3层：市赚率位置（两口径 pct）
-    for col in ("pr_pct", "pr_avg_pct"):
-        if col in metrics.columns:
-            chart[col] = _s2list(metrics[col])
-
-    # 第4层：价格周期位置
+    # 第3层：门控（价格周期位置 + 季报ROE位置）
     if "price_cycle" in metrics.columns:
         chart["price_cycle"] = _s2list(metrics["price_cycle"])
+    if "roe_step_b_pct" in metrics.columns:
+        chart["roe_step_b_pct"] = _s2list(metrics["roe_step_b_pct"])
 
     # 买卖标记（按主口径）
     chart["buy_markers"] = [{"date": e["date"], "value": round(e["read"], 4),
@@ -101,6 +109,16 @@ def _extract_chart(metrics: pd.DataFrame, events: List[Dict], primary: str) -> d
     chart["sell_markers"] = [{"date": e["date"], "value": round(e["read"], 4),
                               "close": round(e["close"], 2)}
                              for e in events if e["kind"] == "卖"]
+    # 被门控挡掉的买点（图上画空心标记，说明"信号到了但没买"）
+    chart["blocked_markers"] = list(blocked or [])
+
+    # 反转体系（月线反转 / 三线红）—— 事件型标记（卖点不展示，用户要求）
+    if tbs:
+        chart["tbs_buy_markers"] = list(tbs.get("buy_markers") or [])
+        chart["tbs_red_markers"] = list(tbs.get("red_markers") or [])
+        chart["tbs_rps50"] = list(tbs.get("rps50") or [])
+        chart["tbs_rps120"] = list(tbs.get("rps120") or [])
+        chart["tbs_rps250"] = list(tbs.get("rps250") or [])
     return chart
 
 
@@ -114,7 +132,10 @@ def build_report(code: str, name: str, as_of, readings: Dict, events: List[Dict]
                  triggers: Optional[List[Dict]] = None,
                  price_cycle: Optional[float] = None,
                  price_cycle_detail: Optional[dict] = None,
-                 metrics: Optional[pd.DataFrame] = None) -> dict:
+                 metrics: Optional[pd.DataFrame] = None,
+                 gates: Optional[List[Dict]] = None,
+                 blocked: Optional[List[Dict]] = None,
+                 tbs: Optional[Dict] = None) -> dict:
     """汇总估值报告为结构化 JSON。"""
     state, color, main, extra = _conclusion(readings, primary, price_cycle)
 
@@ -126,7 +147,8 @@ def build_report(code: str, name: str, as_of, readings: Dict, events: List[Dict]
             for k, v, note in (f.panel_rows(panel_ctx) or []):
                 panel_rows.append({"label": k, "value": v, "note": note})
 
-    chart = _extract_chart(metrics, triggers if triggers is not None else events, primary) \
+    chart = _extract_chart(metrics, triggers if triggers is not None else events, primary,
+                           blocked=blocked, tbs=tbs) \
         if metrics is not None else {}
 
     # 口径说明
@@ -158,6 +180,7 @@ def build_report(code: str, name: str, as_of, readings: Dict, events: List[Dict]
             "buy_threshold": (thresholds[0] if thresholds else None),
             "sell_threshold": (thresholds[1] if thresholds else None),
             "triggers": triggers or [],
+            "gates": gates or [],
             "rows_count": len(metrics) if metrics is not None else 0,
         },
         "conclusion": {"state": state, "color": color, "main": main, "extra": extra,

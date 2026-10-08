@@ -4,11 +4,14 @@
 产出指标（metrics 序列）：
   pb/pe_ttm/turnover    本地估值字段
   roe_impl              隐含ROE = pb/pe_ttm
-  pr/pr_b/pr_avg        市赚率 = PE(倍)/ROE(%) 三口径
+  pr                    市赚率 = PE(倍)/ROE(%)
   pr_adj                修正市赚率 = N×PR
   pb_adj/pb_adj_b       盈利调节残差（v1 日频 / B 季报 两口径）的 expanding 历史位置
   ps/ps_adj/ps_adj_pct  市销率 / 盈利调节市销率残差（ps ~ 隐含净利率）/ 历史位置
   market_drift          市场估值中枢长期漂移（可选扣减）
+
+注：`pr_b`（季报ROE口径）与 `pr_avg`（多年平均ROE口径）已于 2026-10-02 移除 ——
+`pr_avg` 只是 `pe_ttm` 乘一个常数（roe_avg 是标量），两条线形状完全相同，属冗余口径。
 """
 from __future__ import annotations
 
@@ -32,7 +35,6 @@ PCT_MIN_PERIODS = int(get_path("valuation", "pct_min_periods", "250") or "250")
 REG_MIN_PERIODS = int(get_path("valuation", "reg_min_periods", "250") or "250")
 STEP_LAG_DAYS = 30
 LEVEL_WINDOW = 750
-ROE_AVG_YEARS = 3
 # 盈利调节拟合是否带二次项（PB ~ ROE + ROE²）：**默认关**。
 # 实测（2026-09-28，京东方/新和成读数锚点）二次项对本目标无益：新和成高 ROE 区残差反而更低
 # （2026-04 读数 0.776→0.755、2020-04 0.736→0.622），读数平均绝对差 0.102→0.161。
@@ -90,22 +92,6 @@ def payout_to_n(payout, hi=PAYOUT_HI, lo=PAYOUT_LO, n_hi=1.0, n_lo=2.0) -> float
     if x >= hi:
         return n_hi
     return min(n_lo, max(n_hi, hi / x))
-
-
-def avg_roe_from_reports(reports, years=ROE_AVG_YEARS) -> Optional[float]:
-    """多年平均 ROE（小数）：近 years 个年报报告期 ROE 均值。"""
-    if not reports:
-        return None
-    reps = sorted([r for r in reports if r.get("report_date")],
-                  key=lambda r: str(r["report_date"]))
-    annual = [float(r["roe"]) for r in reps
-              if str(r.get("report_date", ""))[5:7] == "12" and isinstance(r.get("roe"), (int, float))]
-    if annual:
-        picked = annual[-years:]
-    else:
-        picked = [float(r["roe_ann"]) for r in reps
-                  if isinstance(r.get("roe_ann"), (int, float))][-2 * years:]
-    return sum(picked) / len(picked) / 100.0 if picked else None
 
 
 def step_roe_from_reports(dates, reports, lag_days=STEP_LAG_DAYS,
@@ -286,11 +272,6 @@ def compute_valuation_metrics(df, params=None, roe_reports=None,
         out["ps_adj"] = map_residual(out["ps"], out["net_margin_impl"],
                                      p.map_window, p.reg_min_periods, quad=p.reg_quad)
 
-    out["pr_b"] = out["pe_ttm"].where(out["pe_ttm"] > 0) / (roe_step_b.where(roe_step_b > 0) * 100.0)
-    roe_avg = avg_roe_from_reports(roe_reports)
-    if roe_avg is not None and roe_avg > 0:
-        out["roe_avg"] = roe_avg
-        out["pr_avg"] = out["pe_ttm"].where(out["pe_ttm"] > 0) / (roe_avg * 100.0)
     out["n"] = payout_to_n(payout_ratio)
     out["pr_adj"] = out["n"] * out["pr"]
 
@@ -313,12 +294,10 @@ def compute_valuation_metrics(df, params=None, roe_reports=None,
             return rolling_pct(src, p.pct_window, p.pct_min_periods)
         return expanding_pct(src, p.pct_min_periods, start_pos=sp)
 
-    for col in ("pb", "pe_ttm", "pr", "pr_adj", "pr_b", "pb_adj"):
+    for col in ("pb", "pe_ttm", "pr", "pr_adj", "pb_adj"):
         src = out[col] if col != "pe_ttm" else out["pe_ttm"].where(out["pe_ttm"] > 0)
         out[f"{col}_pct"] = _pct(src)
     out["roe_impl_pct"] = _pct(out["roe_impl"])
-    if "pr_avg" in out.columns:
-        out["pr_avg_pct"] = _pct(out["pr_avg"])
     if "pb_adj_b" in out.columns:
         out["pb_adj_b_pct"] = _pct(out["pb_adj_b"])
     if "roe_step_b" in out.columns:
@@ -348,9 +327,6 @@ def latest_readings(metrics, payout=None) -> Dict:
     _put("roe_impl", "隐含ROE(pb/pe_ttm)", "roe_impl_pct")
     _put("pr", "市赚率PR", "pr_pct")
     reads["pr"]["n"] = clean_value(last.get("n"))
-    for key, label in (("pr_b", "市赚率PR(季报ROE口径)"), ("pr_avg", "市赚率PR(多年平均ROE口径)")):
-        if key in metrics.columns:
-            _put(key, label, f"{key}_pct")
     _put("pr_adj", "修正市赚率(N×PR)", "pr_adj_pct")
     reads["pr_adj"]["payout"] = payout
     for key, label, roe_key in (("pb_adj_b", "盈利调节市净率(季报口径B)", "roe_step_b"),
@@ -386,13 +362,6 @@ def panel_rows(ctx: dict) -> List[Tuple[str, str, str]]:
     pr = g("pr", {})
     rows.append(("市赚率 PR = PE/ROE(%)", fmt_num(pr.get("value")),
                  f"越低越划算 · 历史位置 {fmt_pct(pr.get('pct'))}"))
-    for key, label in (("pr_b", "市赚率 PR · 季报ROE口径"),
-                       ("pr_avg", "市赚率 PR · 多年平均ROE口径")):
-        d = g(key)
-        if not d:
-            continue
-        rows.append((label, fmt_num(d.get("value")),
-                     f"越低越划算 · 历史位置 {fmt_pct(d.get('pct'))}"))
     adj = g("pr_adj", {})
     n = pr.get("n")
     pay = adj.get("payout") or {}

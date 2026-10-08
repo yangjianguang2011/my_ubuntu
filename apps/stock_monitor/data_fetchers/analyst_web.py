@@ -6,7 +6,7 @@
 
 路由（前缀 /api/analyst）：
   GET /focus_stocks      分析师重点关注股票（top_analysts / top_stocks，支持 all）
-  GET /updated_stocks    最近 N 天更新的跟踪成份股（days 必填；indicator 可选）
+  GET /updated_stocks    最近 N 天更新的跟踪成份股 + 最受关注 TOP N（days 必填；indicator 可选）
   GET /history_tracking  单只股票的历史关注数（stock_code 必填 / days）
   GET /latest_tracking   最新跟踪成份股明细（top_analysts / top_stocks，支持 all）
 """
@@ -60,10 +60,9 @@ def updated_stocks():
     indicator = _indicator_arg()
     logger.info(f"最近更新的股票数据：{days} 天 / {indicator}")
 
-    data = get_analyst_updated_stocks(days=days, indicator=indicator)
-    if data is None:
-        return err(f"未能获取最近 {days} 天更新的股票数据", 404)
-    return ok(data)
+    # 返回 {records, top_stocks, stats, window_days, indicator, as_of}
+    # （top_stocks = 近 N 天最受关注 TOP5，同一分析师对同一股票只计一次）
+    return ok(get_analyst_updated_stocks(days=days, indicator=indicator))
 
 
 @bp.get("/history_tracking")

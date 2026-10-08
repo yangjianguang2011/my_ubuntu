@@ -18,8 +18,6 @@ ensure_project_root()
 import pandas as pd  # noqa: E402
 
 from stock_monitor.analyzers.factor_valuation import (  # noqa: E402
-    ROE_AVG_YEARS,
-    avg_roe_from_reports,
     compute_valuation_metrics,
     payout_to_n,
 )
@@ -67,17 +65,6 @@ def main() -> int:
     # 邮储 30%→33% 例句：N 之比 = 33/30 = 1.10，即股价理应涨 10%
     check("N(30%)/N(33%) = 1.10", payout_to_n(0.30) / payout_to_n(0.33), 1.10, 1e-6)
 
-    print("\n== avg_roe_from_reports（多年平均 ROE，小数）==")
-    reps = [{"report_date": f"{2020 + i}-12-31", "roe": 10.0 + 10 * i, "roe_ann": 10.0 + 10 * i}
-            for i in range(6)]
-    tail = [10.0 + 10 * i for i in range(6)][-ROE_AVG_YEARS:]
-    check(f"近 {ROE_AVG_YEARS} 年年报均值（ROE_AVG_YEARS，取最近 {len(tail)} 期）",
-          avg_roe_from_reports(reps), sum(tail) / len(tail) / 100.0)
-    check("无年报时退化为年化 ROE 均值",
-          avg_roe_from_reports([{"report_date": "2026-06-30", "roe": 8.0, "roe_ann": 16.0}]), 0.16)
-    check_true("空列表 -> None", avg_roe_from_reports([]) is None)
-    check_true("None -> None", avg_roe_from_reports(None) is None)
-
     print("\n== 市赚率合成算例（0830 文：PE 20 倍 / ROE 15% -> 1.33）==")
     m = compute_valuation_metrics(_mk_df(pb=3.0, pe=20.0))
     check("PR = PE / ROE(%)", float(m["pr"].iloc[-1]), 20.0 / 15.0)
@@ -95,12 +82,14 @@ def main() -> int:
         _mk_df(pb=3.0, pe=20.0))["n"].iloc[-1]), 1.0)
 
     print("\n== 多口径列存在性 ==")
-    check_true("pr_b 列始终存在", "pr_b" in m.columns)
-    check_true("无季报 -> pr_avg 列缺席", "pr_avg" not in m.columns)
-    check_true("有季报 -> pr_avg 列存在",
-               "pr_avg" in compute_valuation_metrics(_mk_df(pb=3.0, pe=20.0),
-                                                     roe_reports=reps).columns)
-    check_true("有季报 -> roe_step_b_pct 列存在（面板 ROE 位置用）",
+    # pr_b / pr_avg 已于 2026-10-02 移除（pr_avg 与 pe_ttm 同形，属冗余口径）
+    reps = [{"report_date": f"{2020 + i}-12-31", "roe": 10.0 + 10 * i, "roe_ann": 10.0 + 10 * i}
+            for i in range(6)]
+    check_true("pr_b 列已移除", "pr_b" not in m.columns)
+    check_true("pr_avg 列已移除",
+               "pr_avg" not in compute_valuation_metrics(_mk_df(pb=3.0, pe=20.0),
+                                                         roe_reports=reps).columns)
+    check_true("有季报 -> roe_step_b_pct 列存在（门控/面板用）",
                "roe_step_b_pct" in compute_valuation_metrics(_mk_df(pb=3.0, pe=20.0),
                                                              roe_reports=reps).columns)
     check_true("roe_impl_pct 列存在（隐含ROE 历史位置用）", "roe_impl_pct" in m.columns)

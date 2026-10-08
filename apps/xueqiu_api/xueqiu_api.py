@@ -37,6 +37,10 @@ from urllib.parse import urlencode
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+
+# config 由入口脚本 xueqiu_scraper.py 完成 sys.path 引导后导入
+from config import chromedriver_path
 
 HOME = "https://xueqiu.com"
 UA = (
@@ -169,7 +173,12 @@ class BrowserTransport:
     def start(self) -> "BrowserTransport":
         if self.driver is not None:
             return self
-        self.driver = webdriver.Chrome(options=self._build_options())
+        # 显式指定本地 chromedriver，绕开 Selenium Manager 的联网解析（详见 config.chromedriver_path）
+        _driver = chromedriver_path()
+        self.driver = webdriver.Chrome(
+            service=Service(_driver) if _driver else None,
+            options=self._build_options(),
+        )
         self.driver.set_script_timeout(self.script_timeout)
         self.driver.set_page_load_timeout(self.page_load_timeout)
         # 抹掉 navigator.webdriver 痕迹（风控会看）

@@ -92,17 +92,31 @@ sudo docker exec ubuntu_openclaw md5sum /root/apps/stock_monitor/analyzers/condi
 > 前端静态资源（`web_static/`）与模板（`web_templates/`）同样用 `docker cp`；
 > 静态资源改完可以不清缓存，但**浏览器要强刷**（`Ctrl+F5`）。
 
-### ⚠️ 部署红线（必须排除的私有值文件）
+### ⚠️ 私有值：不要写进仓库或镜像，改用**挂载注入**
 
-同步代码时**绝对不要覆盖**这两个文件 —— NAS 上有私有值：
+私有值（推送凭据、私有域名）**只住在 NAS 宿主目录**，git 与镜像里都只有脱敏版：
 
-| 文件 | 私有内容 |
-|---|---|
-| `apps/stock_monitor/core/notification.py` | 消息推送凭据 |
-| `apps/stock_monitor/web_templates/index.html` | 私有域名链接 |
+| 私有文件（不入库、不进镜像） | 宿主真实位置 | 仓库里的脱敏模板 |
+|---|---|---|
+| `config.ini` | `/vol1/1000/docker/my-ubuntu/apps/config.ini` | `apps/config.ini.example` |
+| `web_templates/index.html` | `…/apps/stock_monitor/web_templates/index.html` | `…/index.html.example` |
 
-`index.html` 在 git 中被忽略（`.gitignore`），仓库里只保留 `index.html.example`（脱敏版），
-`Dockerfile` 用 example 生成 `index.html`。
+`docker-compose.yml` 的 `volumes` 已把这两个宿主真文件**挂载覆盖**容器内的脱敏版：
+
+```yaml
+- /vol1/1000/docker/my-ubuntu/apps/config.ini:/root/apps/config.ini
+- /vol1/1000/docker/my-ubuntu/apps/stock_monitor/web_templates/index.html:/root/apps/stock_monitor/web_templates/index.html
+```
+
+因此：
+
+- **同步代码时不要再传这两个文件**（它们由挂载提供，传了也会被挂载盖住）；
+  同步清单里其余文件（含 `core/notification.py`，它已不再含私有值）照常传。
+- **重建容器/镜像不需要手动改回**：`sudo docker compose build && sudo docker compose up -d` 即可，
+  镜像里是脱敏兜底版，运行时由挂载覆盖成真值。
+- 想改私有值：**只改宿主那个文件**，然后 `sudo docker restart ubuntu_openclaw`（无需重建）。
+- 改了真 `index.html` 后，请**同步更新 `index.html.example`**（私有域名 → `*.example.com`），
+  否则镜像里的兜底版会陈旧。
 
 ---
 
@@ -177,7 +191,7 @@ sudo docker exec ubuntu_openclaw python3 -c "import socket;s=socket.socket();s.s
 
 流程：**停库 → `sync_data` → 起库**，日志追加到 `./sync_cron.log`。
 
-**crontab（用户 `jgyang`，非 root）**：
+**crontab（NAS 普通用户，非 root；具体用户名见部署环境）**：
 
 ```
 0 16 * * * /vol1/1000/docker/my-ubuntu/apps/stockdb/sync_and_restart.sh
@@ -185,8 +199,8 @@ sudo docker exec ubuntu_openclaw python3 -c "import socket;s=socket.socket();s.s
 ```
 
 - 每天 16:00 同步 + 重启；开机后延迟 30s 自动拉起；
-- stockdb 以 **jgyang（非 root）** 运行即可（只需目录读写权限 + 7899 端口 >1024），
-  避免 root 与 jgyang 混用导致属主/pid 混乱。
+- stockdb 以 **NAS 普通用户（非 root）** 运行即可（只需目录读写权限 + 7899 端口 >1024），
+  避免 root 与普通用户混用导致属主/pid 混乱。
 
 ---
 

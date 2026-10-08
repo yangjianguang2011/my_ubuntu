@@ -145,10 +145,18 @@ python3 start_app.py
 
 - SSH 服务允许 root 登录，**密码请通过部署环境自行设置**（不要写进仓库）
 - 建议使用强密码并限制 SSH 访问 IP
-- 私有值（推送凭据、私有域名）只存在于部署环境，**不入库**：
-  - `apps/config.ini`（由 `apps/config.ini.example` 复制而来）
-  - `apps/stock_monitor/core/notification.py`
-  - `apps/stock_monitor/web_templates/index.html`（仓库只保留脱敏的 `index.html.example`）
+- **私有值（推送凭据、私有域名）只住在 NAS 宿主目录**，git 与镜像里都只有脱敏版：
+
+  | 私有文件（不入库、不进镜像） | 宿主位置 | 仓库里的脱敏模板 |
+  |---|---|---|
+  | `config.ini` | `/vol1/1000/docker/my-ubuntu/apps/config.ini` | `apps/config.ini.example` |
+  | `index.html` | `…/apps/stock_monitor/web_templates/index.html` | `…/index.html.example` |
+
+  运行时由 `docker-compose.yml` 的 `volumes` 把这两个宿主真文件**挂载覆盖**容器内的脱敏版。
+  所以：**重建容器/镜像不需要手动改回**；改私有值只改宿主那份 + 重启。
+  改了真 `index.html` 后请同步更新 `index.html.example`（私有域名 → `*.example.com`）。
+- `core/notification.py` **不再是私有文件**：它只从 `config.ini` 的 `[messaging]` 读值，可以正常入库/同步。
+- 部署与重建细节见 [`docs/NAS部署说明.md`](docs/NAS部署说明.md)。
 
 ---
 

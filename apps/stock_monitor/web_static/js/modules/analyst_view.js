@@ -266,7 +266,7 @@ function loadAnalystUpdatedStocks() {
     console.log(`请求最近更新的股票数据，天数: ${days}`);
 
     // 生成缓存键
-    const recentlyUpdatedCacheKey = AnalystCache.generateKey('analyst_recently_updated_stocks', {days: days});
+    const recentlyUpdatedCacheKey = AnalystCache.generateKey('analyst_recently_updated_stocks_v2', {days: days});
 
     // 尝试从缓存获取数据
     const cachedData = AnalystCache.get(recentlyUpdatedCacheKey);
@@ -320,45 +320,82 @@ function loadAnalystUpdatedStocks() {
 
 // 渲染最近更新的股票数据
 function renderRecentlyUpdatedStocks(data, container) {
-    // 计算统计信息
-    const analystsSet = new Set();
-    const stocksSet = new Set();
-    const stockAnalystCount = {}; // 记录每个股票被多少个分析师跟踪
+    const payload = (data && data.data) || {};
+    const records = payload.records || [];
+    const stats = payload.stats || {};
+    const topStocks = payload.top_stocks || [];
+    const days = payload.window_days || 30;
+    const asOf = payload.as_of ? `（数据截至 ${payload.as_of}）` : '';
 
-    data.data.forEach(item => {
-        // 统计分析师
-        if (item.analyst_name) {
-            analystsSet.add(item.analyst_name);
-        }
+    // 统计一律用**后端算好的**（口径：同一分析师对同一股票只计一次），
+    // 避免前端各算一份导致与「重点关注股票」口径不一致。
+    const nAnalysts = stats.analysts || 0;
+    const nUnique = stats.unique_stocks || 0;
+    const nMulti = stats.multi_analyst || 0;
+    const density = nAnalysts ? (records.length / nAnalysts).toFixed(1) : '-';
+    const dupRate = nUnique ? (nMulti / nUnique * 100).toFixed(1) : '-';
 
-        // 统计股票
-        if (item['股票代码']) {
-            stocksSet.add(item['股票代码']);
-
-            // 记录每个股票被多少个分析师跟踪
-            if (!stockAnalystCount[item['股票代码']]) {
-                stockAnalystCount[item['股票代码']] = 0;
-            }
-            stockAnalystCount[item['股票代码']]++;
-        }
-    });
-
-    // 计算被多个分析师跟踪的股票数量
-    const multiAnalystStocks = Object.values(stockAnalystCount).filter(count => count > 1).length;
+    // —— 近 N 天最受关注 TOP N（每月 1 号等权买入的候选）——
+    const cell = 'padding:5px 9px;border-bottom:1px solid #eef1f4;';
+    const head = 'padding:6px 9px;border-bottom:1px solid #d6e4f0;color:#2c3e50;white-space:nowrap;';
+    let topHtml = '';
+    if (topStocks.length) {
+        const body = topStocks.map((s, i) => {
+            const raw = (s.stage_pct === null || s.stage_pct === undefined) ? NaN : Number(s.stage_pct);
+            const pctText = isNaN(raw) ? '-' : ((raw >= 0 ? '+' : '') + raw.toFixed(2) + '%');
+            const pctColor = isNaN(raw) ? '#666' : (raw >= 0 ? '#28a745' : '#dc3545');
+            const price = (s.latest_price === null || s.latest_price === undefined)
+                ? '-' : Number(s.latest_price).toFixed(2);
+            return `<tr>
+                <td style="${cell}text-align:center;color:#888;">${i + 1}</td>
+                <td style="${cell}font-family:monospace;">${s.stock_code}</td>
+                <td style="${cell}">${s.stock_name || ''}</td>
+                <td style="${cell}text-align:center;font-weight:700;color:#c0392b;">${s.analyst_count}</td>
+                <td style="${cell}">${s.latest_rating_date || '-'}</td>
+                <td style="${cell}text-align:right;">${price}</td>
+                <td style="${cell}text-align:right;color:${pctColor};font-weight:600;">${pctText}</td>
+            </tr>`;
+        }).join('');
+        topHtml = `
+            <div style="margin-top:12px;">
+                <div style="font-weight:600;color:#2c3e50;margin-bottom:6px;">
+                    近 ${days} 天最受关注 TOP ${topStocks.length}
+                    <span style="font-weight:normal;color:#888;font-size:12px;">
+                        （按「不同分析师数」排序，同一分析师对同一股票只计一次）
+                    </span>
+                </div>
+                <table style="border-collapse:collapse;font-size:13px;width:100%;max-width:860px;background:#fff;">
+                    <thead><tr style="background:#eef6ff;">
+                        <th style="${head}text-align:center;">#</th>
+                        <th style="${head}">股票代码</th>
+                        <th style="${head}">股票名称</th>
+                        <th style="${head}text-align:center;">分析师数</th>
+                        <th style="${head}">最近评级日</th>
+                        <th style="${head}text-align:right;">现价</th>
+                        <th style="${head}text-align:right;">阶段涨跌幅</th>
+                    </tr></thead>
+                    <tbody>${body}</tbody>
+                </table>
+            </div>`;
+    } else {
+        topHtml = `<div style="margin-top:12px;color:#999;font-size:13px;">
+            近 ${days} 天内没有满足条件的跟踪记录（无法生成 TOP 榜）</div>`;
+    }
 
     // 清空容器并添加数据摘要，将统计信息移到表格上方
     let formattedHtml = `
         <div class="analyst-full-width-panel">
             <div class="analyst-summary">
                 <h3>最近更新股票数据摘要</h3>
-                <p><strong>算法说明：</strong>筛选最近${data.days}天内有更新的分析师，取其跟踪的成份股。「最新跟踪」按<b>最新评级日期</b>判定、「历史跟踪」按<b>调出日期</b>判定（该字段缺失时退回调入日期）。口径同为东方财富<b>年度收益率排行</b>（${new Date().getFullYear()} 年前 100 名）。</p>
-                <p><strong>参数设置：</strong>时间范围: 最近${data.days}天</p>
-                <p><strong>数据统计：</strong>符合条件分析师: ${analystsSet.size} |
-                   符合条件股票: ${data.data.length} |
-                   唯一股票: ${stocksSet.size} |
-                   多人关注: ${multiAnalystStocks}</p>
-                <p><strong>数据密度：</strong>人均跟踪: ${(data.data.length/analystsSet.size).toFixed(1)}只 |
-                   重复度: ${(multiAnalystStocks/stocksSet.size*100).toFixed(1)}%</p>
+                <p><strong>算法说明：</strong>筛选最近${days}天内有更新的分析师，取其跟踪的成份股。「最新跟踪」按<b>最新评级日期</b>判定、「历史跟踪」按<b>调出日期</b>判定（该字段缺失时退回调入日期）。口径同为东方财富<b>年度收益率排行</b>（${new Date().getFullYear()} 年前 100 名）。</p>
+                <p><strong>参数设置：</strong>时间范围: 最近${days}天 ${asOf}</p>
+                <p><strong>数据统计：</strong>符合条件分析师: ${nAnalysts} |
+                   符合条件股票: ${records.length} |
+                   唯一股票: ${nUnique} |
+                   多人关注: ${nMulti}</p>
+                <p><strong>数据密度：</strong>人均跟踪: ${density}只 |
+                   重复度: ${dupRate}%</p>
+                ${topHtml}
             </div>
             <div class="analyst-data-panel">
                 <div id="recently-updated-stocks-table-container"></div>
@@ -367,8 +404,8 @@ function renderRecentlyUpdatedStocks(data, container) {
     `;
     container.innerHTML = formattedHtml;
 
-    // 初始化Tabulator表格
-    initRecentlyUpdatedStocksTable(data.data);
+    // 初始化Tabulator表格（逐条明细）
+    initRecentlyUpdatedStocksTable(records);
 }
 
 // 初始化最近更新股票表格

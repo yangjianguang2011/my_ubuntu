@@ -26,6 +26,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple
 
+import numpy as np
 import pandas as pd
 
 from .picker_rules import (
@@ -38,6 +39,7 @@ from .picker_rules import (
 
 GROUP_TECH = "技术面"
 GROUP_VAL = "估值面"
+GROUP_STRATEGY = "策略信号"
 
 # ---------------------------------------------------------------- 全局参数
 GLOBAL_PARAMS: Dict[str, dict] = {
@@ -112,7 +114,8 @@ class Condition:
     params: Dict[str, dict] = field(default_factory=dict)   # 条件专属参数规格
     needs: Tuple[str, ...] = ("kline",)                     # 数据需求（决定分层）
     default_on: bool = False
-    note: str = ""                                          # 说明（前端 tooltip）
+    note: str = ""                                          # 说明（前端常显，支持 **加粗**）
+    details: Tuple[str, ...] = ()                           # 展开后的明细（前端 <details> 折叠）
     prepare: Optional[Callable] = None                      # (global_p, cond_p) -> 预生成对象
 
     @property
@@ -159,6 +162,7 @@ def condition_catalog() -> dict:
                         "id": c.id, "label": c.label, "group": c.group,
                         "params": c.params, "needs": list(c.needs),
                         "default_on": c.default_on, "slow": c.slow, "note": c.note,
+                        "details": list(c.details),
                     }
                     for c in lst
                 ],
@@ -260,7 +264,7 @@ def _ev_bias_band(ctx, p: dict) -> dict:
 
 register(Condition(
     id="structure", label="多头结构", group=GROUP_TECH, evaluate=_ev_structure,
-    prepare=_prep_rules, default_on=True,
+    prepare=_prep_rules, default_on=False,
     note="价格站上慢线、中/快线依次高于慢线、快线向上；"
          "「快慢线最小间距」>0 时额外要求快线高于慢线该幅度（原「均线多头排列」已并入）",
     params={
@@ -276,7 +280,7 @@ register(Condition(
 ))
 register(Condition(
     id="golden_cross", label="金叉确认", group=GROUP_TECH, evaluate=_ev_golden_cross,
-    prepare=_prep_rules, default_on=True,
+    prepare=_prep_rules, default_on=False,
     note="近 N 根内中线（ma_mid）上穿慢线（ma_slow）",
     params={
         "cross_lookback_bars": {"label": "金叉回溯(根)", "type": "int",
@@ -289,7 +293,7 @@ register(Condition(
 ))
 register(Condition(
     id="pullback", label="回踩买点", group=GROUP_TECH, evaluate=_ev_pullback,
-    prepare=_prep_rules, default_on=True,
+    prepare=_prep_rules, default_on=False,
     note="现价贴近快线且不深破中线；近 N 根内 LOW 曾回踩快线带",
     params={
         "pullback_min_dist_pct": {"label": "距快线下限%", "type": "float",
@@ -396,3 +400,101 @@ for _f, _lbl in _VAL_FIELD_OPTS:
                           "min": -1000000, "max": 1000000},
         },
     ))
+
+
+# ---------------------------------------------------------------- 策略信号条件
+# 反转体系（月线反转 / 三线红）—— **横截面 RPS** 是全系统唯一的跨股票维度，
+# 与「相对自身历史」的时序读数正交，故单独成组（见 `docs/…-安装与配置指南.md` §7）。
+def _ev_monthly_reversal(ctx, p: dict) -> dict:
+    """月线反转 6.5：近 N 个交易日内出现过信号（事件型，非当日态）。
+
+    RPS 由编排器**一次性横截面预计算**后放进 `ctx["rps"]`（{code: DataFrame}），
+    因此本条件**不需要** `needs=("valuation",)` —— 它只依赖日K + RPS。
+    """
+    from .strategy_tbs import compute_tbs
+
+    frame = ctx.get("frame")
+    if frame is None or frame.empty:
+        return _miss("无行情数据")
+
+    rps = (ctx.get("rps") or {}).get(ctx.get("code"))
+    if rps is None:
+        return _miss("RPS 不可得（上市不足一年 / 已被剔除 / RPS 未计算）")
+
+    try:
+        m = compute_tbs(frame, rps=rps)
+    except Exception as e:  # noqa: BLE001
+        return _miss(f"信号计算异常：{type(e).__name__}")
+
+    if m.empty:
+        return _miss("信号计算失败")
+
+    win = int(p.get("lookback_days") or 15)
+    sig = m["monthly_reversal"].fillna(False).astype(bool)
+    recent = sig.tail(win)
+    hit = bool(recent.any())
+    days_ago = None
+    if hit:
+        days_ago = int(len(sig) - 1 - np.flatnonzero(sig.values)[-1])
+    return _res(
+        hit,
+        (f"近 {win} 日内{'出现' if hit else '未出现'}月线反转信号"
+         + (f"（{days_ago} 日前）" if hit else "")),
+        {"monthly_reversal_days_ago": days_ago,
+         "rps50": None if pd.isna(m["rps50"].iloc[-1]) else float(m["rps50"].iloc[-1]),
+         "rps120": None if pd.isna(m["rps120"].iloc[-1]) else float(m["rps120"].iloc[-1]),
+         "rps250": None if pd.isna(m["rps250"].iloc[-1]) else float(m["rps250"].iloc[-1])},
+    )
+
+
+def _ev_triple_red(ctx, p: dict) -> dict:
+    """三线红：RPS50 / RPS120 / RPS250 **同时** ≥ 阈值（默认 90）。"""
+    frame = ctx.get("frame")
+    if frame is None or frame.empty:
+        return _miss("无行情数据")
+    m = (ctx.get("rps") or {}).get(ctx.get("code"))
+    if m is None or m.empty:
+        return _miss("RPS 不可得")
+
+    thr = float(p.get("rps_min") or 0.90)
+    last = m.iloc[-1]
+    vals = [last.get(c) for c in ("rps50", "rps120", "rps250")]
+    if any(v is None or pd.isna(v) for v in vals):
+        return _miss("RPS 不完整（三线需 50/120/250 全部可得）")
+    ok = all(float(v) >= thr for v in vals)
+    return _res(ok, f"RPS50/120/250 = "
+                    f"{', '.join(f'{float(v) * 100:.1f}' for v in vals)}"
+                    f"（要求全部 ≥{thr * 100:.0f}）",
+                {"rps50": float(vals[0]), "rps120": float(vals[1]),
+                 "rps250": float(vals[2])})
+
+
+register(Condition(
+    id="monthly_reversal", label="月线反转 6.5", group=GROUP_STRATEGY,
+    evaluate=_ev_monthly_reversal, default_on=False,
+    note="「月线反转」：挑底部转强、涨得还不多的股票。7 组条件须同日全中才算一次信号。"
+         "事件型：看「近 N 日内是否出现过」（不要求今天正好是信号日）。",
+    details=(
+        "FYX1 相对强度：RPS50 > 87 或 RPS120 > 90（池内排名 ×100）",
+        "FYX2 结构紧凑：低点抬高 —— 50日低>200日低 / 30日低>120日低 / 20日低>50日低",
+        "FYX3 创N日新高：10日内曾创80日新高；或 当天创50日新高且 RPS≥90",
+        "FYX4 站上均线：收盘 > MA20 且 > MA200，且 MA120/MA200 > 0.9",
+        "FYX5 站上天数：45日内站上MA200 2~44天；或曾跌破200/250线后重新站上",
+        "FYX6 涨幅上限：30日最高/120日最低 < 1.50~1.65（涨太多就排除）",
+        "FYX7 距高点：(5日最高/120日最高 > 0.85 或 >0.8) 且 收盘/10日最高 > 0.9",
+    ),
+    params={
+        "lookback_days": {"label": "近 N 日内出现过", "type": "int",
+                          "default": 15, "min": 1, "max": 250},
+    },
+))
+register(Condition(
+    id="triple_red", label="三线红", group=GROUP_STRATEGY,
+    evaluate=_ev_triple_red, default_on=False,
+    note="RPS50 / RPS120 / RPS250 同时翻红 —— 短中长期均处于市场强势前列。"
+         "（与「月线反转」近似互斥：后者命中的股票当前 RPS 通常只有 80 上下，建议二选一）",
+    params={
+        "rps_min": {"label": "RPS 下限(0~1)", "type": "float",
+                    "default": 0.90, "min": 0.0, "max": 1.0},
+    },
+))

@@ -18,6 +18,10 @@ services:
     volumes:
       - /vol1/1000/docker/my-ubuntu/run:/data           # 数据卷
       - /vol1/1000/docker/my-ubuntu/apps/stockdb:/root/apps/stockdb   # stockdb SDK（pybao，含 stockdb.pyd）
+      # —— 私有值注入：镜像里只有脱敏版，真值只住在宿主这一个目录 ——
+      # 好处：git 与镜像都不含私有值；重建容器/镜像**无需手动改回**，重启即生效。
+      - /vol1/1000/docker/my-ubuntu/apps/config.ini:/root/apps/config.ini
+      - /vol1/1000/docker/my-ubuntu/apps/stock_monitor/web_templates/index.html:/root/apps/stock_monitor/web_templates/index.html
       - /vol1/1009/paddle_mount:/paddle                 # PaddleOCR 模型
       - /vol1/1000/docker/openclaw:/root/.openclaw
     restart: unless-stopped

@@ -35,6 +35,8 @@ _UPDATED_DATE_FIELDS = {
     "历史跟踪成分股": ("调出日期", "调入日期"),      # 最近被调出
 }
 DEFAULT_INDICATOR = "最新跟踪成分股"
+# 「近 N 天最受关注」摘要默认取前几名（每月 1 号等权买入的候选数量）
+TOP_BOUGHT_N = 5
 
 
 def _year() -> int:
@@ -312,17 +314,92 @@ def get_analyst_latest_tracking(top_analysts=50, top_stocks=50):
     return latest
 
 
-def get_analyst_updated_stocks(days=30, indicator=DEFAULT_INDICATOR):
-    """最近 N 天内「有更新」的跟踪成份股。
+def _aggregate_top_bought(records, top_n=None):
+    """把逐条「分析师 × 股票」记录聚合为「被最多分析师跟踪」的排名。
+
+    去重口径（与东财页面/HTML 报告一致）：**同一分析师对同一股票只计一次**
+    （取该分析师对该股票的最新评级日期）。
+    排序：分析师数 DESC → 最近评级日期 DESC → 股票代码 ASC。
+    `top_n=None` 返回全部聚合结果（调用方自行切片）。
+    """
+    by_stock = {}
+    for rec in records or []:
+        code = str(rec.get("股票代码", "")).strip().upper()
+        if not code:
+            continue
+        info = by_stock.get(code)
+        if info is None:
+            info = {
+                "stock_code": code,
+                "stock_name": str(rec.get("股票名称", "")).strip(),
+                "analysts": {},            # analyst_name -> 最新评级日期（str，去重）
+                "latest_rating_date": "",
+                "first_entry_date": "",
+                "trade_prices": [],
+                "latest_price": None,
+                "stage_pct": None,
+            }
+            by_stock[code] = info
+
+        analyst = str(rec.get("analyst_name", "")).strip()
+        rating = str(rec.get("最新评级日期") or "").strip()
+        if analyst:
+            prev = info["analysts"].get(analyst)
+            if prev is None or (rating and rating > prev):
+                info["analysts"][analyst] = rating
+        if rating > info["latest_rating_date"]:
+            info["latest_rating_date"] = rating
+        entry = str(rec.get("调入日期") or "").strip()
+        if entry and (not info["first_entry_date"] or entry < info["first_entry_date"]):
+            info["first_entry_date"] = entry
+        price = _to_float(rec.get("成交价格(前复权)"))
+        if price is not None:
+            info["trade_prices"].append(price)
+        if info["latest_price"] is None:
+            info["latest_price"] = _to_float(rec.get("最新价格"))
+        if info["stage_pct"] is None:
+            info["stage_pct"] = _to_float(rec.get("阶段涨跌幅"))
+
+    rows = []
+    for info in by_stock.values():
+        prices = info.pop("trade_prices")
+        rows.append({
+            "stock_code": info["stock_code"],
+            "stock_name": info["stock_name"],
+            "analyst_count": len(info["analysts"]),
+            "analysts": sorted(info["analysts"]),
+            "latest_rating_date": info["latest_rating_date"],
+            "first_entry_date": info["first_entry_date"],
+            "avg_price": round(sum(prices) / len(prices), 2) if prices else None,
+            "latest_price": info["latest_price"],
+            "stage_pct": info["stage_pct"],
+        })
+
+    # 稳定多键排序：先代码升序 → 再评级日降序 → 最后分析师数降序（主键）
+    rows.sort(key=lambda x: x["stock_code"])
+    rows.sort(key=lambda x: x["latest_rating_date"], reverse=True)
+    rows.sort(key=lambda x: x["analyst_count"], reverse=True)
+    return rows[:top_n] if top_n else rows
+
+
+def get_analyst_updated_stocks(days=30, indicator=DEFAULT_INDICATOR, top_n=TOP_BOUGHT_N):
+    """最近 N 天内「有更新」的跟踪成份股 + 被最多分析师跟踪的 TOP N。
 
     「更新」的判定字段按跟踪类型取（见 `_UPDATED_DATE_FIELDS`）：
     最新跟踪看「最新评级日期」，历史跟踪看「调出日期」，缺失时退回「调入日期」。
+
+    返回 dict（**不再返回裸 list**，v2 缓存键）：
+      ``records``    逐条明细（分析师 × 股票），供明细表
+      ``top_stocks`` 近 N 天最受关注 TOP N（**同一分析师对同一股票只计一次**）
+      ``stats``      分析师数 / 记录数 / 唯一股票数 / 多人关注数
+                     （**后端统一计算**，避免前端各算一份导致口径不一致）
+      ``window_days`` / ``indicator`` / ``as_of``
     """
     if indicator not in _UPDATED_DATE_FIELDS:
         raise ValueError(f"未知跟踪类型：{indicator}（可选：{list(_UPDATED_DATE_FIELDS)}）")
 
     threshold = (datetime.now() - timedelta(days=days)).date()
-    cache_key = f"recently_updated_stocks_{days}_{indicator}"
+    cache_key = f"recently_updated_stocks_v2_{days}_{indicator}"
     cached = get_analyst_cached_data(cache_key)
     if cached is not None:
         logger.info(f"从缓存返回最近更新股票（{days} 天 / {indicator}）")
@@ -355,12 +432,34 @@ def get_analyst_updated_stocks(days=30, indicator=DEFAULT_INDICATOR):
                 stock["analyst_period_12m_return"] = analyst.get("12个月收益率", "")
                 recent.append(stock)
 
-        logger.info(f"最近 {days} 天内更新的{indicator}：{len(recent)} 条")
-        set_analyst_cache_data(cache_key, recent)
-        return recent
+        all_rows = _aggregate_top_bought(recent)
+        stats = {
+            "analysts": len({r.get("analyst_name") for r in recent if r.get("analyst_name")}),
+            "records": len(recent),
+            "unique_stocks": len(all_rows),
+            "multi_analyst": sum(1 for s in all_rows if s["analyst_count"] > 1),
+        }
+        result = {
+            "records": recent,
+            "top_stocks": all_rows[:top_n],
+            "top_n": top_n,
+            "window_days": days,
+            "indicator": indicator,
+            "as_of": date.today().isoformat(),
+            "stats": stats,
+        }
+        logger.info(
+            f"最近 {days} 天内更新的{indicator}：{len(recent)} 条 / "
+            f"{stats['analysts']} 位分析师 / {stats['unique_stocks']} 只唯一股票"
+            f"（{stats['multi_analyst']} 只被多人关注）")
+        set_analyst_cache_data(cache_key, result)
+        return result
     except Exception as e:  # noqa: BLE001
         logger.error(f"获取最近更新股票失败: {e}", exc_info=True)
-        return []
+        return {"records": [], "top_stocks": [], "top_n": top_n, "window_days": days,
+                "indicator": indicator, "as_of": date.today().isoformat(),
+                "stats": {"analysts": 0, "records": 0, "unique_stocks": 0,
+                          "multi_analyst": 0}}
 
 
 def _parse_date(value):

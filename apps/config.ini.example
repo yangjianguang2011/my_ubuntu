@@ -89,9 +89,35 @@ sell_threshold = 0.90
 threshold_overrides =
 ; 历史位置窗口（交易日）：0=expanding(起于 data_start)；>0=滚动窗口
 pct_window = 0
+; 历史位置(expanding)的最少样本数；低于此值不出分位（默认 250）
+pct_min_periods = 250
+; 残差回归(PB~ROE)的最少样本数；低于此值不出残差（默认 250）
+reg_min_periods = 250
+; 残差回归是否加二次项（PB~ROE 非线性修正）。实测更差，默认关闭
+reg_quad = false
 ; 多因子融合层：默认关闭
 fusion_enabled = false
 
+; ---- 买点门控：多因子「主信号 + 门控」架构（2026-10-02）----
+; 主信号 = 信号口径读数 ≤ buy_threshold；门控是"必须通过"的与条件，**只作用于买**
+;   roe_quality    盈利质量：季报年化ROE的历史位置 ≥ gate_roe_quality_min（排除"东西变了"）
+;   price_position 价格位置：价格周期位置 ≤ gate_price_position_max（排除"接飞刀"）
+; 逗号分隔；**留空 = 不启用**（当前默认）。
+; 消融实测（hs300 全池 298 只 / 2012~2026，scripts/valuation_eval_gates.py）：
+;   roe_quality    回撤改善 +3.2pp，但超额 -28.9pp  → 不划算
+;   price_position 回撤改善 +0.7pp，超额  -1.8pp   → 不划算
+;   两者都开       回撤改善 +3.8pp，超额 -31.3pp   → 不划算
+; 想试就填 `roe_quality,price_position`，改完重启生效。
+buy_gates =
+gate_roe_quality_min = 0.30
+gate_price_position_max = 0.60
+
+; 反转体系（月线反转 / 三线红 / 有效跌破20日线卖点）是否画进估值报告图表：
+;   true  —— 第 0 层叠加事件标记（月线反转买 / 三线红 / 跌破20线卖），
+;            第 3 层叠加 RPS50/120/250 曲线（默认图例隐藏）
+;   false —— 完全不计算、不显示（省一次全市场 RPS 取数：首次约 4~5 分钟，进程内缓存）
+; 说明：RPS 是**横截面**相对强度，必须全市场算；首次请求会慢，之后同进程复用。
+tbs_enabled = true
 [messaging]
 ; 消息推送服务配置 - 请修改为您的实际配置
 message_server = https://your-message-server.example.com

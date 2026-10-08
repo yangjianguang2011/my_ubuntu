@@ -3,6 +3,8 @@
 .vscode/
 .workbuddy-ai/
 run/
+# AGENTS.md：仅供 AI 会话参考的仓库说明，刻意不入库（本地保留）
+AGENTS.md
 
 # 敏感配置文件
 apps/config.ini

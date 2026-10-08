@@ -12,12 +12,14 @@ logs
 **/*.py[cod]
 *.log
 
-# 私人配置与凭据（config.ini 仍需参与构建，见 Dockerfile；仅排除 cookies）
+# 私人配置与凭据（config.ini / index.html 已改为 compose 挂载，不进镜像；此处仅排除 cookies）
 apps/xueqiu/xueqiu_cookies*.txt
 apps/xueqiu/cookies_backups
 
-# 私有首页模板：构建时用 index.html.example 生成（见 Dockerfile）
+# 私有首页模板与私有配置：构建时用脱敏版（见 Dockerfile），真文件不进镜像
+# （真 index.html 由 compose 挂载覆盖；config.ini 由 compose 挂载覆盖）
 apps/stock_monitor/web_templates/index.html
+apps/config.ini
 
 # 生成物
 apps/stock_monitor/reports

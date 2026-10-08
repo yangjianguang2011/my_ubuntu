@@ -171,9 +171,14 @@
         var st = (meta && meta.sell_threshold !== undefined) ? meta.sell_threshold : null;
         var fmtThr = function (v) { return (v === null || v === undefined) ? '—' : v.toFixed(2); };
         var trg = (meta && meta.triggers) ? meta.triggers.length : 0;
+        var gs = (meta && meta.gates) || [];
+        var gtxt = gs.length
+            ? ' · 买点门控：' + gs.map(function (g) { return g.name + ' ' + g.op + ' ' + g.threshold; }).join(' 且 ')
+            : ' · 买点门控：未启用（单因子信号）';
         var note = '生效阈值：买 ≤ ' + fmtThr(bt) + ' / 卖 ≥ ' + fmtThr(st)
             + '（' + esc(sig) + '）· 二态机交易 ' + buyN + ' 笔买 / ' + sellN + ' 笔卖'
-            + ' · 多次触发标记 ' + trg + ' 个（每次进入极端区，图上全画，不影响交易归并）';
+            + ' · 多次触发标记 ' + trg + ' 个（每次进入极端区，图上全画，不影响交易归并）'
+            + gtxt;
         $('vl-events-note').textContent = note;
     }
 
@@ -199,13 +204,16 @@
             + '</div>'
             + '<div style="color:#999;font-size:12px;margin-top:6px;">区间 ' + esc(stats.start) + ' ~ ' + esc(stats.end) + ' · ' + holdTxt
             + ' · 生效阈值 买≤' + (stats.buy_threshold !== undefined ? stats.buy_threshold.toFixed(2) : '—')
-            + ' / 卖≥' + (stats.sell_threshold !== undefined ? stats.sell_threshold.toFixed(2) : '—') + '</div>';
+            + ' / 卖≥' + (stats.sell_threshold !== undefined ? stats.sell_threshold.toFixed(2) : '—')
+            + (stats.gate_blocked ? ' · 门控挡下买点 ' + stats.gate_blocked + ' 天' : '') + '</div>';
     }
 
-    // ---- ECharts 三层时序图 ----
+    // ---- ECharts 四层时序图（价格 / 估值读数 / 市赚率 / 门控）----
     function renderChart(d, meta) {
         var el = $('vl-chart');
         if (!window.echarts) { el.innerHTML = '<p style="color:#999;">ECharts 未加载</p>'; return; }
+        // 四层需要更高画布；容器高度由模板给的 760px 抬到 900px（模板是私有文件，故在 JS 里设）
+        if (el.style.height !== '900px') el.style.height = '900px';
         if (!chart) chart = window.echarts.init(el);
         chart.setOption(buildChartOption(d, meta), true);
         chart.resize();
@@ -220,7 +228,8 @@
         };
     }
 
-    function pctLine(name, data, color, gridIdx, withRef, yAxisIdx) {
+    // 历史位置曲线；marks 非空时画门控阈值参考线
+    function pctLine(name, data, color, gridIdx, withRef, yAxisIdx, marks) {
         var s = {
             name: name, type: 'line', data: data || [],
             xAxisIndex: gridIdx,
@@ -229,6 +238,15 @@
             itemStyle: { color: color }, connectNulls: true,
         };
         if (withRef) s.markLine = refLine();
+        if (marks && marks.length) {
+            s.markLine = {
+                silent: true, symbol: 'none',
+                lineStyle: { type: 'dashed', color: '#b8860b', width: 1 },
+                label: { show: true, position: 'insideEndTop', fontSize: 10, color: '#b8860b',
+                         formatter: function (p) { return p.name; } },
+                data: marks,
+            };
+        }
         return s;
     }
 
@@ -236,34 +254,37 @@
         var dates = d.dates || [];
         var grids = [], xAxes = [], yAxes = [], series = [];
 
-        // 有季报 ROE 时才挂第2层右轴：提前算，网格留出右侧刻度空间
+        // 有季报 ROE 时才给第2层挂右轴：提前算，网格留出右侧刻度空间
         var hasRoe = (d.roe_step_b !== undefined && d.roe_step_b !== null);
 
-        // 三层网格（价格周期已移除，见 docs：纯价格与第1层重复）
-        var gridTops = ['4%', '37%', '70%'];
-        var legendTops = ['1%', '34%', '67%'];
-        for (var i = 0; i < 3; i++) {
-            grids.push({ left: 64, right: (i === 1 && hasRoe) ? 54 : 28, top: gridTops[i], height: '25%' });
+        // 四层网格：0 价格 / 1 估值读数 / 2 市赚率(+ROE右轴) / 3 门控
+        var N = 4;
+        var gridTops = ['4%', '28%', '52%', '76%'];
+        var legendTops = ['1%', '25%', '49%', '73%'];
+        for (var i = 0; i < N; i++) {
+            grids.push({
+                left: 64,
+                right: (i === 2 && hasRoe) ? 54 : 28,
+                top: gridTops[i], height: '20%',
+            });
             xAxes.push({
                 type: 'category', gridIndex: i, data: dates,
                 boundaryGap: false,
-                axisLabel: { show: i === 2, fontSize: 10 },
-                axisLine: { show: i === 2 },
-                axisTick: { show: i === 2 },
+                axisLabel: { show: i === N - 1, fontSize: 10 },
+                axisLine: { show: i === N - 1 },
+                axisTick: { show: i === N - 1 },
             });
         }
 
-        // 第1层：收盘价（自缩放）
-        yAxes.push({ gridIndex: 0, scale: true, splitNumber: 4, axisLabel: { fontSize: 10 } });
-        // 第2/3层：0~1 历史位置
-        for (var j = 1; j < 3; j++) {
+        // 轴0：价格（自缩放）；轴1~3：0~1 历史位置；另加轴4：第2层右轴（ROE 原始值）
+        yAxes.push({ gridIndex: 0, scale: true, splitNumber: 3, axisLabel: { fontSize: 10 } });
+        for (var j = 1; j < N; j++) {
             yAxes.push({ gridIndex: j, min: 0, max: 1, interval: 0.5, axisLabel: { fontSize: 10 } });
         }
-        // 第2层右轴（index=3）：季报年化 ROE 原始值(%)；仅当有数据时挂，保证轴号确定
         var ROE_AXIS = yAxes.length;
         if (hasRoe) {
             yAxes.push({
-                gridIndex: 1, position: 'right', scale: true, splitNumber: 4,
+                gridIndex: 2, position: 'right', scale: true, splitNumber: 3,
                 splitLine: { show: false },
                 axisLabel: {
                     fontSize: 10,
@@ -272,23 +293,56 @@
             });
         }
 
-        // 第1层：收盘价 + 买卖标记
+        // ---- 第0层：价格 + 买卖标记 + 被门控挡下的标记 ----
         series.push({ name: '收盘价', type: 'line', data: d.close || [], xAxisIndex: 0, yAxisIndex: 0,
             symbol: 'none', lineStyle: { width: 1.4, color: '#2c3e50' }, itemStyle: { color: '#2c3e50' }, connectNulls: true });
         series.push({
             name: '买入机会', type: 'scatter', xAxisIndex: 0, yAxisIndex: 0, z: 5,
             data: (d.buy_markers || []).map(function (m) { return { value: [m.date, m.close] }; }),
-            symbol: 'triangle', symbolSize: 10, itemStyle: { color: '#1f7a33' },
+            symbol: 'triangle', symbolSize: 11, itemStyle: { color: '#1f7a33' },
         });
         series.push({
             name: '卖出风险', type: 'scatter', xAxisIndex: 0, yAxisIndex: 0, z: 5,
             data: (d.sell_markers || []).map(function (m) { return { value: [m.date, m.close] }; }),
-            symbol: 'triangle', symbolSize: 10, symbolRotate: 180, itemStyle: { color: '#c0392b' },
+            symbol: 'triangle', symbolSize: 11, symbolRotate: 180, itemStyle: { color: '#c0392b' },
+        });
+        series.push({
+            name: '信号被门控挡下', type: 'scatter', xAxisIndex: 0, yAxisIndex: 0, z: 4,
+            data: (d.blocked_markers || []).map(function (m) { return { value: [m.date, m.close] }; }),
+            symbol: 'triangle', symbolSize: 9,
+            itemStyle: { color: '#ffffff', borderColor: '#b8860b', borderWidth: 1.6 },
         });
 
-        // 各层曲线定义：[key, 名称, 颜色, 默认显示, 挂 0.10/0.90 参考线, yAxisIndex(可选，默认=层号)]
-        // 第 1 层默认显示"实际信号源"（meta.signal_col）
+        // ---- 第0层：反转体系事件标记（月线反转 / 三线红 / 有效跌破20日线）----
+        if (d.tbs_buy_markers) {
+            series.push({
+                name: '月线反转(买)', type: 'scatter', xAxisIndex: 0, yAxisIndex: 0, z: 6,
+                data: (d.tbs_buy_markers || []).map(function (m) { return { value: [m.date, m.close] }; }),
+                symbol: 'pin', symbolSize: 20,
+                itemStyle: { color: '#e8a33d', borderColor: '#8a5a00', borderWidth: 1 },
+                label: { show: false },
+            });
+        }
+        if (d.tbs_red_markers) {
+            series.push({
+                name: '三线红(关注)', type: 'scatter', xAxisIndex: 0, yAxisIndex: 0, z: 5,
+                data: (d.tbs_red_markers || []).map(function (m) { return { value: [m.date, m.close] }; }),
+                symbol: 'circle', symbolSize: 8,
+                itemStyle: { color: '#d94f4f', borderColor: '#8b1a1a', borderWidth: 1 },
+            });
+        }
+
+        // ---- 各层曲线定义：[key, 名称, 颜色, 默认显示, 挂0.10/0.90参考线, yAxisIndex, 门控阈值线] ----
         var sigCol = (meta && meta.signal_col) || 'pb_adj_b_pct';
+        var gates = (meta && meta.gates) || [];
+        function gateThr(key) {
+            for (var i = 0; i < gates.length; i++) { if (gates[i].key === key) return gates[i]; }
+            return null;
+        }
+        var gPc = gateThr('price_position'), gRoe = gateThr('roe_quality');
+        var marksPc = gPc ? [{ yAxis: gPc.threshold, name: gPc.name + ' ≤' + gPc.threshold }] : [];
+        var marksRoe = gRoe ? [{ yAxis: gRoe.threshold, name: gRoe.name + ' ≥' + gRoe.threshold }] : [];
+
         var l1 = [];
         if (sigCol === 'fusion_pct') {
             l1.push(['fusion_pct', '多因子融合读数（信号源）', '#c0392b', true, true]);
@@ -300,29 +354,34 @@
         l1.push(['pb_adj_pct', '盈利调节市净率·日频ROE', '#8e44ad', false, false]);
         l1.push(['pb_pct', '市净率 PB', '#2980b9', false, false]);
         l1.push(['pe_ttm_pct', '市盈率 PE', '#16a085', false, false]);
-        var layerDefs = {
-            1: l1,
-            2: [
-                ['pr_avg_pct', '市赚率·多年平均ROE', '#c0392b', true, true],
-                ['pr_pct', '市赚率·推导ROE', '#2980b9', false, false],
-            ],
-        };
-        // 第二层补一条 ROE 曲线：季报年化 ROE 原始值(%)，走右轴，图例默认隐藏
+
+        var l2 = [['pr_pct', '市赚率 PR', '#2980b9', true, true]];
         if (hasRoe) {
-            layerDefs[1].push(['roe_step_b', '季报年化ROE(%)·右轴', '#d35400', false, false, ROE_AXIS]);
+            l2.push(['roe_step_b', '季报年化ROE(%)·右轴', '#d35400', false, false, ROE_AXIS]);
         }
+
+        var l3 = [
+            ['price_cycle', '价格周期位置（门控）', '#7f8c8d', true, false, null, marksPc],
+            ['roe_step_b_pct', '季报ROE位置（门控）', '#d35400', true, false, null, marksRoe],
+            ['tbs_rps250', 'RPS250 相对强度', '#8a5a00', false, false],
+            ['tbs_rps120', 'RPS120 相对强度', '#b8860b', false, false],
+            ['tbs_rps50', 'RPS50 相对强度', '#e8a33d', false, false],
+        ];
+
+        var layerDefs = { 1: l1, 2: l2, 3: l3 };
 
         // 每层一个 legend（放在该层网格上方）；selected 控制默认显隐
         var legends = [{
             top: legendTops[0], left: 'center', type: 'scroll',
             itemWidth: 12, itemHeight: 9, textStyle: { fontSize: 11 },
-            data: ['收盘价', '买入机会', '卖出风险'],
+            data: ['收盘价', '买入机会', '卖出风险', '信号被门控挡下',
+                   '月线反转(买)', '三线红(关注)'],
         }];
-        for (var li = 1; li <= 2; li++) {
+        for (var li = 1; li < N; li++) {
             var names = [], sel = {};
             (layerDefs[li] || []).forEach(function (c) {
                 if (d[c[0]] !== undefined && d[c[0]] !== null) {
-                    series.push(pctLine(c[1], d[c[0]], c[2], li, c[4], c[5]));
+                    series.push(pctLine(c[1], d[c[0]], c[2], li, c[4], c[5], c[6]));
                     names.push(c[1]);
                     sel[c[1]] = c[3];
                 }
@@ -343,12 +402,13 @@
             xAxis: xAxes,
             yAxis: yAxes,
             dataZoom: [
-                { type: 'inside', xAxisIndex: [0, 1, 2], start: 0, end: 100 },
-                { type: 'slider', xAxisIndex: [0, 1, 2], bottom: 0, height: 18, start: 0, end: 100 },
+                { type: 'inside', xAxisIndex: [0, 1, 2, 3], start: 0, end: 100 },
+                { type: 'slider', xAxisIndex: [0, 1, 2, 3], bottom: 0, height: 18, start: 0, end: 100 },
             ],
             series: series,
         };
     }
+
 
     // ---- 初始化 ----
     function bind() {

@@ -28,6 +28,11 @@
             .replace(/</g, '&lt;').replace(/>/g, '&gt;');
     }
 
+    // 行内轻量 markdown：**加粗** → <b>。**先转义再替换**，不会引入 XSS。
+    function mdInline(s) {
+        return escAttr(s).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
+    }
+
     function paramInput(condId, name, spec) {
         var id = 'pkp-' + condId + '-' + name;
         if (spec.type === 'bool') {
@@ -64,27 +69,44 @@
 
         // 条件：按分组渲染到**各自容器**（组标题已在 HTML 中，便于分区更明显）
         (catalog.groups || []).forEach(function (g) {
-            var isVal = String(g.group).indexOf('估值') >= 0;
-            var target = isVal ? $('pk-conditions-val') : $('pk-conditions-tech');
+            var name = String(g.group);
+            // 三分区映射：技术面 / 策略信号 / 估值面（**按组名**映射到各自容器，
+            // 与后端 groups 的返回顺序无关）
+            var isVal = name.indexOf('估值') >= 0;
+            var isStrat = name.indexOf('策略') >= 0;
+            var target = isStrat ? $('pk-conditions-strat')
+                : (isVal ? $('pk-conditions-val') : $('pk-conditions-tech'));
             if (!target) return;
-            var color = isVal ? '#8e44ad' : '#1f7a33';
-            target.innerHTML = (g.conditions || []).map(function (c) {
+            var color = isStrat ? '#b9770e' : (isVal ? '#8e44ad' : '#1f7a33');
+            var border = isStrat ? '#f7e2c0' : (isVal ? '#e8ddf0' : '#dbe8db');
+            var boxes = (g.conditions || []).map(function (c) {
                 COND_LABELS[c.id] = c.label;
                 var ps = Object.keys(c.params || {}).map(function (pn) {
                     return paramInput(c.id, pn, c.params[pn]);
                 }).join('');
+                var det = (c.details && c.details.length)
+                    ? '<details style="margin:2px 0 4px;"><summary style="font-size:11px;'
+                      + 'color:#8a6d3b;cursor:pointer;">展开 ' + c.details.length + ' 条明细</summary>'
+                      + '<ul style="margin:4px 0 0;padding-left:16px;font-size:11px;'
+                      + 'color:#666;line-height:1.5;">'
+                      + c.details.map(function (t) { return '<li>' + mdInline(t) + '</li>'; }).join('')
+                      + '</ul></details>'
+                    : '';
                 return '<div data-condbox="' + escAttr(c.id) + '" style="border:1px solid '
-                    + (isVal ? '#e8ddf0' : '#dbe8db')
+                    + border
                     + ';border-radius:5px;padding:7px 10px;background:#fff;min-width:240px;">'
                     + '<label style="display:flex;align-items:center;gap:5px;font-size:13px;">'
                     + '<input type="checkbox" data-cond="' + escAttr(c.id) + '"'
                     + (c.default_on ? ' checked' : '') + '>'
                     + '<b style="color:' + color + ';">' + escAttr(c.label) + '</b></label>'
                     + (c.note ? '<div style="font-size:11px;color:#999;margin:2px 0 4px;">'
-                                + escAttr(c.note) + '</div>' : '')
+                                + mdInline(c.note) + '</div>' : '')
+                    + det
                     + '<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end;">'
                     + ps + '</div></div>';
             }).join('');
+            // 同一分组可能被渲染一次；不同分组的容器相互独立
+            target.innerHTML = boxes;
         });
     }
 
@@ -93,6 +115,26 @@
             catalog = (resp && resp.data) || null;
             if (catalog) renderCatalog();
         }).catch(function (e) { setBanner('条件清单加载失败：' + e.message); });
+    }
+
+    // 股票池下拉**由后端下发**（POOL_NAME），避免前端硬编码漏掉新池
+    function loadPools() {
+        return apiCall('/api/picker/pools').then(function (resp) {
+            var pools = (resp && resp.data) || [];
+            var sel = $('pk-pool');
+            if (!sel || !pools.length) return;
+            POOL_LABEL = {};
+            pools.forEach(function (p) { POOL_LABEL[p.key] = p.label; });
+            var prev = sel.value;
+            sel.innerHTML = pools.map(function (p) {
+                return '<option value="' + escAttr(p.key) + '">'
+                    + escAttr(p.label) + '</option>';
+            }).join('');
+            // 默认「优选池」（后端 POOL_NAME 第一项）；若之前已选则保持
+            var def = pools[0].key;
+            var has = pools.some(function (p) { return p.key === prev; });
+            sel.value = has ? prev : def;
+        }).catch(function () { /* 失败则保留 HTML 里的静态兜底选项 */ });
     }
 
     function readParams(box, attr) {
@@ -116,7 +158,10 @@
         });
 
         var conditions = {};
-        var boxes = document.querySelectorAll('#pk-conditions-tech [data-cond], #pk-conditions-val [data-cond]');
+        var boxes = document.querySelectorAll(
+            '#pk-conditions-tech [data-cond], '
+            + '#pk-conditions-strat [data-cond], '
+            + '#pk-conditions-val [data-cond]');
         Array.prototype.forEach.call(boxes, function (cb) {
             var cid = cb.getAttribute('data-cond');
             var box = cb.closest('[data-condbox]');
@@ -138,6 +183,7 @@
         if (!s.tech_passed && !s.val_scanned) { el.textContent = ''; return; }
         var parts = [];
         if (s.tech_passed) parts.push('技术 ' + s.tech_passed);
+        if (s.strat_scanned) parts.push('策略 ' + s.strat_scanned);
         if (s.val_scanned) parts.push('估值 ' + s.val_scanned);
         parts.push('命中 ' + ((s.matched || []).length));
         el.textContent = parts.join('  →  ');
@@ -187,6 +233,7 @@
             state.matched = s.matched || [];
             state.partial = s.partial || [];
             state.message = s.message || '';
+            if (s.pool_label) EXPORT_POOL = s.pool_label;
             // 进度条用**当前阶段**的百分比（后端 progress_pct 已按 stage_total 计算）
             setBar(s.running ? (s.progress_pct || 2) : 100);
             var prefix = (s.stage && s.stage !== '完成') ? '[' + s.stage + '] ' : '';
@@ -247,11 +294,15 @@
 
     var msgByRule = { structure: '多头结构', golden_cross: '金叉确认', pullback: '回踩确认', volume: '缩量' };
 
+    // 条件 id → 中文名：先看本地短表，再回落到 catalog 下发的标签（覆盖月线反转等新条件）
+    function ruleLabel(id) {
+        return msgByRule[id] || COND_LABELS[id] || id;
+    }
+
     function reasonHtml(reasons) {
         return reasons.map(function (r) {
             var mark = r.passed ? '<span style="color:#389e0d;">✓</span>' : '<span style="color:#cf1322;">✗</span>';
-            var tag = r.rule_id + '/';
-            return mark + ' <b>' + esc((msgByRule[r.rule_id] || r.rule_id)) + '</b> — <span style="color:#555;">' + esc(r.note) + '</span>';
+            return mark + ' <b>' + esc(ruleLabel(r.rule_id)) + '</b> — <span style="color:#555;">' + esc(r.note) + '</span>';
         }).join('<br>');
     }
 
@@ -276,17 +327,17 @@
     }
 
     function renderPart() {
-        // 观察(部分命中)：保留至少命中 多头结构 或 金叉确认 之一的；仅单独命中回踩确认/缩量易造成干扰，予以剔除
+        // 观察(部分命中)：**任何条件命中都保留**（不再只留"多头结构/金叉确认"——
+        // 那会让策略信号（月线反转/三线红）的部分命中整片消失）
         var kept = (state.partial || []).filter(function (it) {
-            var r = it.hit_rules || [];
-            return r.indexOf('structure') >= 0 || r.indexOf('golden_cross') >= 0;
+            return (it.hit_rules || []).length > 0;
         });
         var rows = kept.map(function (it) {
             return {
                 code: it.code,
                 name: '<b>' + esc(it.name) + '</b>',
                 price: esc(it.price),
-                rules: esc((it.hit_rules || []).map(function (r) { return msgByRule[r] || r; }).join('、') || '—'),
+                rules: esc((it.hit_rules || []).map(ruleLabel).join('、') || '—'),
             };
         });
         fillTable(rows, COLS_PART); setEmptyMsg('暂无观察列表。');
@@ -308,6 +359,97 @@
     }
 
     function setEmptyMsg(text) { $('pk-empty').textContent = text; }
+
+    // ---------------------------------------------------------------- 导出 CSV
+    var EXPORT_POOL = '';   // 最近一次扫描的股票池标签（用于文件名）
+    var histRows = [];      // 历史快照行（供导出）
+    var POOL_LABEL = {};    // pool key -> 中文名（由 /api/picker/pools 填充）
+
+    /** CSV 单元格转义：含逗号/引号/换行 → 双引号包裹，内部引号翻倍。 */
+    function csvCell(v) {
+        var s = (v === undefined || v === null) ? '' : String(v);
+        return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+    }
+
+    /** 下载 CSV（**带 BOM**，Excel 双击不乱码；CRLF 换行）。 */
+    function downloadCsv(filename, rows) {
+        var csv = '\uFEFF' + rows.map(function (r) {
+            return r.map(csvCell).join(',');
+        }).join('\r\n');
+        var blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement('a');
+        a.href = url; a.download = filename;
+        document.body.appendChild(a); a.click(); document.body.removeChild(a);
+        setTimeout(function () { URL.revokeObjectURL(url); }, 0);
+    }
+
+    function stamp() {
+        var d = new Date(), p = function (n) { return (n < 10 ? '0' : '') + n; };
+        return '' + d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()) + '_'
+             + p(d.getHours()) + p(d.getMinutes());
+    }
+
+    /** 命中/未命中的纯文本明细（页面用的是 HTML，导出要纯文本）。 */
+    function reasonsText(rs) {
+        return (rs || []).map(function (r) {
+            return (r.passed ? '✓' : '✗') + ' ' + ruleLabel(r.rule_id) + ' — ' + (r.note || '');
+        }).join(' ; ');
+    }
+
+    function exportRows() {
+        if (activeTab === 'hit') {
+            var head = ['代码', '名称', '现价', '当日涨跌%', '慢线', '距快线%', '命中规则', '命中明细'];
+            var body = (state.matched || []).map(function (it) {
+                var dist = metric(it.reasons, 'dist_to_ma_fast_pct');
+                var passed = (it.reasons || []).filter(function (r) { return r.passed; });
+                return [it.code, it.name, it.price, it.change_pct,
+                        metric(it.reasons, 'ma_slow'),
+                        (dist === null || dist === undefined) ? '' : Number(dist).toFixed(2),
+                        passed.map(function (r) { return ruleLabel(r.rule_id); }).join('、'),
+                        reasonsText(it.reasons)];
+            });
+            return { name: '选股_完整命中', rows: [head].concat(body) };
+        }
+        if (activeTab === 'part') {
+            var head2 = ['代码', '名称', '现价', '已命中规则'];
+            var body2 = (state.partial || [])
+                .filter(function (it) { return (it.hit_rules || []).length > 0; })
+                .map(function (it) {
+                    return [it.code, it.name, it.price,
+                            (it.hit_rules || []).map(ruleLabel).join('、')];
+                });
+            return { name: '选股_观察', rows: [head2].concat(body2) };
+        }
+        // 历史快照：导出快照列表
+        var head3 = ['运行', '股票池', '命中', '扫描', '完成时间'];
+        var body3 = (histRows || []).map(function (r) {
+            return [r.run_label, r.pool, r.matched_count, r.scanned, r.created_at];
+        });
+        return { name: '选股_历史快照', rows: [head3].concat(body3) };
+    }
+
+    function doExport() {
+        var t = exportRows();
+        if (!t || t.rows.length <= 1) { setBanner('当前表没有可导出的数据'); return; }
+        var pool = EXPORT_POOL || '池';
+        downloadCsv(t.name + '_' + pool + '_' + stamp() + '.csv', t.rows);
+        setBanner('已导出 ' + (t.rows.length - 1) + ' 行（' + t.name + '）');
+    }
+
+    /** 导出按钮挂在 Tab 行末尾（由 JS 创建，避免动 NAS 私有 index.html）。 */
+    function ensureExportButton() {
+        if ($('pk-export')) return;
+        var anchor = $('pk-tab-hist') || $('pk-tab-hit');
+        if (!anchor || !anchor.parentNode) return;
+        var b = document.createElement('button');
+        b.id = 'pk-export';
+        b.textContent = '⤓ 导出当前表';
+        b.title = '把当前标签页的内容导出为 CSV（Excel 可直接打开）';
+        b.style.cssText = 'padding:6px 14px;margin-left:auto;';
+        b.addEventListener('click', doExport);
+        anchor.parentNode.appendChild(b);
+    }
 
     var snapLoadedLast = null;
     function loadHistTab() {
@@ -457,16 +599,18 @@
     }
 
     function renderHist() {
-        var rows = (snapLoadedLast || []).map(function (s) {
+        histRows = (snapLoadedLast || []).map(function (s) {
+            var poolName = POOL_LABEL[s.pool] || s.pool;
             return {
                 run_id: s.run_id,
                 run_label: fmtRunId(s.run_id),
-                pool: s.pool === 'zz500' ? '中证500' : (s.pool === 'hs300' ? '沪深300' : s.pool),
+                pool: poolName,
                 matched_count: s.matched_count,
                 scanned: s.scanned,
                 created_at: (s.created_at || '').replace('T', ' '),
             };
         });
+        var rows = histRows;
         fillTable(rows, COLS_HIST);
         setEmptyMsg('暂无历史快照。');
         // 给运行行加 data-run-id + 可展开指示(▸) 样式
@@ -513,6 +657,8 @@
         bind();
         switchTab('hit');
         loadCatalog();          // 条件清单（动态表单）
+        loadPools();            // 股票池（后端下发，默认优选池）
+        ensureExportButton();   // 「导出当前表」按钮（JS 创建，不动 index.html）
         apiCall('/api/picker/status').then(function (resp) {
             var s = resp.data || resp;
             state.running = s.running;
